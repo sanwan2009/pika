@@ -9,7 +9,6 @@ const AdminLayout = lazy(() => import('../pages/AdminLayout'));
 const AgentListPage = lazy(() => import('../pages/Agents/AgentList'));
 const AgentDetailPage = lazy(() => import('../pages/Agents/AgentDetail'));
 const AgentInstallPage = lazy(() => import('../pages/Agents/AgentInstall'));
-const AuditResultPage = lazy(() => import('../pages/Agents/AuditResult'));
 const ApiKeyListPage = lazy(() => import('../pages/ApiKeys/ApiKeyList'));
 const SettingsPage = lazy(() => import('../pages/Settings'));
 const ServerListPage = lazy(() => import('../pages/Public/ServerList'));
@@ -81,10 +80,6 @@ const router = createBrowserRouter([
             {
                 path: 'agents/:id',
                 element: lazyLoad(AgentDetailPage),
-            },
-            {
-                path: 'agents/:id/audit',
-                element: lazyLoad(AuditResultPage),
             },
             {
                 path: 'agents-install',
