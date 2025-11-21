@@ -1,7 +1,17 @@
-import React, {type ReactNode} from 'react';
-import {useEffect, useMemo, useState} from 'react';
+import React, {type ReactNode, useEffect, useMemo, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
-import {Activity, ArrowLeft, Cpu, HardDrive, Loader2, MemoryStick, Network, Server, Box, Thermometer, Zap} from 'lucide-react';
+import {
+    Activity,
+    ArrowLeft,
+    Cpu,
+    HardDrive,
+    Loader2,
+    MemoryStick,
+    Network,
+    Server,
+    Thermometer,
+    Zap
+} from 'lucide-react';
 import type {TooltipProps} from 'recharts';
 import {
     Area,
@@ -15,15 +25,22 @@ import {
     XAxis,
     YAxis,
 } from 'recharts';
-import {getAgent, getAgentLatestMetrics, getAgentMetrics, type GetAgentMetricsRequest, getNetworkMetricsByInterface} from '../../api/agent';
+import {
+    getAgent,
+    getAgentLatestMetrics,
+    getAgentMetrics,
+    type GetAgentMetricsRequest,
+    getNetworkMetricsByInterface,
+    type NetworkMetricByInterface
+} from '../../api/agent';
 import type {
     Agent,
     AggregatedCPUMetric,
+    AggregatedDiskIOMetric,
+    AggregatedDiskMetric,
+    AggregatedGPUMetric,
     AggregatedMemoryMetric,
     AggregatedNetworkMetric,
-    AggregatedDiskMetric,
-    AggregatedDiskIOMetric,
-    AggregatedGPUMetric,
     AggregatedTemperatureMetric,
     LatestMetrics
 } from '../../types';
@@ -340,7 +357,7 @@ const useAggregatedMetrics = (agentId: string | undefined, range: TimeRange) => 
 
 // 用于获取按网卡分组的网络指标
 const useNetworkMetricsByInterface = (agentId: string | undefined, range: TimeRange) => {
-    const [networkMetrics, setNetworkMetrics] = useState<AggregatedNetworkMetric[]>([]);
+    const [networkMetrics, setNetworkMetrics] = useState<NetworkMetricByInterface[]>([]);
 
     useEffect(() => {
         if (!agentId) {
@@ -577,7 +594,12 @@ const ServerDetail = () => {
 
     // GPU 图表数据（汇总所有GPU的平均利用率）
     const gpuChartData = useMemo(() => {
-        const aggregated: Record<string, { time: string; utilization: number; temperature: number; count: number }> = {};
+        const aggregated: Record<string, {
+            time: string;
+            utilization: number;
+            temperature: number;
+            count: number
+        }> = {};
 
         metricsData.gpu.forEach((item) => {
             const time = new Date(item.timestamp).toLocaleTimeString('zh-CN', {
@@ -775,8 +797,10 @@ const ServerDetail = () => {
     return (
         <div className="min-h-screen bg-slate-50 text-slate-900">
             <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 pb-10 pt-6 sm:px-6 lg:px-8">
-                <section className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 p-6 text-white shadow-xl">
-                    <div className="absolute inset-0 opacity-30 [background-image:radial-gradient(circle_at_top,rgba(255,255,255,0.35),transparent_55%)]"/>
+                <section
+                    className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 p-6 text-white shadow-xl">
+                    <div
+                        className="absolute inset-0 opacity-30 [background-image:radial-gradient(circle_at_top,rgba(255,255,255,0.35),transparent_55%)]"/>
                     <div className="relative flex flex-col gap-6">
                         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
                             <div className="space-y-4">
@@ -789,7 +813,8 @@ const ServerDetail = () => {
                                     返回概览
                                 </button>
                                 <div className="flex items-start gap-4">
-                                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/10 text-white">
+                                    <div
+                                        className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/10 text-white">
                                         <Server className="h-7 w-7"/>
                                     </div>
                                     <div>
@@ -1209,7 +1234,8 @@ const ServerDetail = () => {
                                     >
                                         <div className="mb-3 flex items-center justify-between">
                                             <div className="flex items-center gap-2">
-                                                <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-50 text-purple-600">
+                                                <span
+                                                    className="flex h-9 w-9 items-center justify-center rounded-lg bg-purple-50 text-purple-600">
                                                     <Zap className="h-4 w-4"/>
                                                 </span>
                                                 <div>
@@ -1224,7 +1250,8 @@ const ServerDetail = () => {
                                         <div className="space-y-2 text-xs">
                                             <div className="flex items-center justify-between">
                                                 <span className="text-slate-500">温度</span>
-                                                <span className="font-medium text-slate-900">{gpu.temperature.toFixed(1)}°C</span>
+                                                <span
+                                                    className="font-medium text-slate-900">{gpu.temperature.toFixed(1)}°C</span>
                                             </div>
                                             <div className="flex items-center justify-between">
                                                 <span className="text-slate-500">显存</span>
@@ -1234,11 +1261,13 @@ const ServerDetail = () => {
                                             </div>
                                             <div className="flex items-center justify-between">
                                                 <span className="text-slate-500">功耗</span>
-                                                <span className="font-medium text-slate-900">{gpu.powerDraw.toFixed(1)}W</span>
+                                                <span
+                                                    className="font-medium text-slate-900">{gpu.powerDraw.toFixed(1)}W</span>
                                             </div>
                                             <div className="flex items-center justify-between">
                                                 <span className="text-slate-500">风扇转速</span>
-                                                <span className="font-medium text-slate-900">{gpu.fanSpeed.toFixed(0)}%</span>
+                                                <span
+                                                    className="font-medium text-slate-900">{gpu.fanSpeed.toFixed(0)}%</span>
                                             </div>
                                         </div>
                                     </div>

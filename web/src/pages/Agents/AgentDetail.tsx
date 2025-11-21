@@ -1,21 +1,35 @@
 import {useEffect, useState} from 'react';
-import {useNavigate, useParams} from 'react-router-dom';
-import type {MenuProps} from 'antd';
-import {App, Button, Card, Col, Descriptions, Dropdown, Row, Space, Spin, Tag} from 'antd';
-import {Activity, ArrowLeft, Clock, RefreshCw, Shield, Terminal} from 'lucide-react';
+import {useNavigate, useParams, useSearchParams} from 'react-router-dom';
+import type {MenuProps, TabsProps} from 'antd';
+import {App, Button, Card, Col, Descriptions, Dropdown, Row, Space, Spin, Tag, Tabs, Alert, Statistic} from 'antd';
+import {
+    Activity,
+    ArrowLeft,
+    Clock,
+    RefreshCw,
+    Shield,
+    Terminal,
+    CheckCircle,
+    XCircle,
+    AlertTriangle,
+    TrendingUp
+} from 'lucide-react';
 import {getAgentForAdmin, getAuditResult, sendAuditCommand, type VPSAuditResult} from '../../api/agent';
 import type {Agent} from '../../types';
 import dayjs from 'dayjs';
 import {getErrorMessage} from '../../lib/utils';
+import AuditResultView from './AuditResultView';
 
 const AgentDetail = () => {
     const {id} = useParams<{ id: string }>();
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
     const {message: messageApi} = App.useApp();
     const [loading, setLoading] = useState(false);
     const [agent, setAgent] = useState<Agent | null>(null);
     const [auditResult, setAuditResult] = useState<VPSAuditResult | null>(null);
     const [auditing, setAuditing] = useState(false);
+    const [activeTab, setActiveTab] = useState<string>(searchParams.get('tab') || 'info');
 
     const fetchData = async () => {
         if (!id) return;
@@ -39,6 +53,12 @@ const AgentDetail = () => {
     const handleStartAudit = async () => {
         if (!id) return;
 
+        // 检查是否为 Linux 系统
+        if (!agent?.os.toLowerCase().includes('linux')) {
+            messageApi.warning('安全审计功能仅支持 Linux 系统');
+            return;
+        }
+
         setAuditing(true);
         try {
             await sendAuditCommand(id);
@@ -59,6 +79,11 @@ const AgentDetail = () => {
         fetchData();
     }, [id]);
 
+    useEffect(() => {
+        // 同步 activeTab 到 URL
+        setSearchParams({tab: activeTab});
+    }, [activeTab]);
+
     if (loading && !agent) {
         return (
             <div className="text-center py-24">
@@ -67,7 +92,7 @@ const AgentDetail = () => {
         );
     }
 
-    // 命令菜单配置 - 方便扩展新命令
+    // 命令菜单配置
     const commandMenuItems: MenuProps['items'] = [
         {
             key: 'audit',
@@ -84,19 +109,200 @@ const AgentDetail = () => {
             label: '刷新数据',
             onClick: fetchData,
         },
-        // 可以在这里添加更多命令
-        // {
-        //     key: 'restart',
-        //     icon: <RotateCw size={16} />,
-        //     label: '重启探针',
-        //     onClick: handleRestartAgent,
-        // },
-        // {
-        //     key: 'update',
-        //     icon: <Download size={16} />,
-        //     label: '更新探针',
-        //     onClick: handleUpdateAgent,
-        // },
+    ];
+
+    // 计算审计统计
+    const passCount = auditResult?.securityChecks.filter(c => c.status === 'pass').length || 0;
+    const failCount = auditResult?.securityChecks.filter(c => c.status === 'fail').length || 0;
+    const warnCount = auditResult?.securityChecks.filter(c => c.status === 'warn').length || 0;
+    const totalCount = auditResult?.securityChecks.length || 0;
+
+    // Tab 项配置
+    const tabItems: TabsProps['items'] = [
+        {
+            key: 'info',
+            label: (
+                <span className="flex items-center gap-2">
+                    <Activity size={16}/>
+                    基本信息
+                </span>
+            ),
+            children: (
+                <Descriptions column={{xs: 1, sm: 2}} bordered>
+                    <Descriptions.Item label="探针名称">{agent?.name}</Descriptions.Item>
+                    <Descriptions.Item label="探针ID">{agent?.id}</Descriptions.Item>
+                    <Descriptions.Item label="主机名">{agent?.hostname}</Descriptions.Item>
+                    <Descriptions.Item label="IP地址">{agent?.ip}</Descriptions.Item>
+                    <Descriptions.Item label="操作系统">
+                        <Tag color="blue">{agent?.os}</Tag>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="系统架构">
+                        <Tag>{agent?.arch}</Tag>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="平台">
+                        {agent?.platform ? <Tag color="purple">{agent.platform}</Tag> : '-'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="位置">
+                        {agent?.location ? <Tag color="blue">{agent.location}</Tag> : '-'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="到期时间">
+                        {agent?.expireTime ? (
+                            <div className="flex flex-col gap-1">
+                                <div>{new Date(agent.expireTime).toLocaleDateString('zh-CN')}</div>
+                                {(() => {
+                                    const expireDate = new Date(agent.expireTime);
+                                    const now = new Date();
+                                    const isExpired = expireDate < now;
+                                    const daysLeft = Math.ceil((expireDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+                                    if (isExpired) {
+                                        return <Tag color="red" bordered={false}>已过期</Tag>;
+                                    } else if (daysLeft <= 7) {
+                                        return <Tag color="orange" bordered={false}>{daysLeft}天后到期</Tag>;
+                                    } else if (daysLeft <= 30) {
+                                        return <Tag color="gold" bordered={false}>{daysLeft}天后到期</Tag>;
+                                    }
+                                    return null;
+                                })()}
+                            </div>
+                        ) : '-'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="探针版本">{agent?.version}</Descriptions.Item>
+                    <Descriptions.Item label="最后活跃时间">
+                        <Space>
+                            <Clock size={14}/>
+                            {agent?.lastSeenAt && dayjs(agent.lastSeenAt).format('YYYY-MM-DD HH:mm:ss')}
+                        </Space>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="创建时间">
+                        {agent?.createdAt && dayjs(agent.createdAt).format('YYYY-MM-DD HH:mm:ss')}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="更新时间">
+                        {agent?.updatedAt && dayjs(agent.updatedAt).format('YYYY-MM-DD HH:mm:ss')}
+                    </Descriptions.Item>
+                </Descriptions>
+            ),
+        },
+        {
+            key: 'audit',
+            label: (
+                <span className="flex items-center gap-2">
+                    <Shield size={16}/>
+                    安全审计
+                    {auditResult && failCount > 0 && (
+                        <Tag color="error" style={{marginLeft: 4}}>{failCount}</Tag>
+                    )}
+                </span>
+            ),
+            children: (
+                <Space direction="vertical">
+                    {/* 非 Linux 系统提示 */}
+                    {agent && !agent.os.toLowerCase().includes('linux') && (
+                        <Alert
+                            message="功能限制"
+                            description="安全审计功能仅支持 Linux 系统。当前系统为 Windows 或其他系统，无法使用此功能。"
+                            type="warning"
+                            showIcon
+                        />
+                    )}
+
+                    {!auditResult ? (
+                        agent?.os.toLowerCase().includes('linux') ? (
+                            <Alert
+                                message="暂无审计结果"
+                                description={
+                                    <Space direction="vertical">
+                                        <span>该探针还没有进行过安全审计。点击右上角"下发命令"按钮，选择"安全审计"来执行首次审计。</span>
+                                        <Button
+                                            type="primary"
+                                            icon={<Shield size={16}/>}
+                                            onClick={handleStartAudit}
+                                            loading={auditing}
+                                        >
+                                            立即开始审计
+                                        </Button>
+                                    </Space>
+                                }
+                                type="info"
+                                showIcon
+                            />
+                        ) : null
+                    ) : (
+                        <>
+                            {/* 审计概览 */}
+                            <Card bordered={false}>
+                                <Row gutter={[16, 16]}>
+                                    <Col xs={12} sm={6}>
+                                        <Statistic
+                                            title="总检查项"
+                                            value={totalCount}
+                                            prefix={<Shield size={18} className="lg:w-5 lg:h-5"/>}
+                                        />
+                                    </Col>
+                                    <Col xs={12} sm={6}>
+                                        <Statistic
+                                            title="通过"
+                                            value={passCount}
+                                            valueStyle={{color: '#52c41a'}}
+                                            prefix={<CheckCircle size={18} className="lg:w-5 lg:h-5"/>}
+                                        />
+                                    </Col>
+                                    <Col xs={12} sm={6}>
+                                        <Statistic
+                                            title="失败"
+                                            value={failCount}
+                                            valueStyle={{color: '#ff4d4f'}}
+                                            prefix={<XCircle size={18} className="lg:w-5 lg:h-5"/>}
+                                        />
+                                    </Col>
+                                    <Col xs={12} sm={6}>
+                                        <Statistic
+                                            title="警告"
+                                            value={warnCount}
+                                            valueStyle={{color: '#faad14'}}
+                                            prefix={<AlertTriangle size={18} className="lg:w-5 lg:h-5"/>}
+                                        />
+                                    </Col>
+                                    <Col xs={12} sm={12}>
+                                        <Statistic
+                                            title="风险评分"
+                                            value={auditResult.riskScore}
+                                            suffix="/ 100"
+                                            valueStyle={{
+                                                color: auditResult.riskScore >= 80 ? '#ff4d4f' :
+                                                    auditResult.riskScore >= 50 ? '#faad14' :
+                                                        auditResult.riskScore >= 20 ? '#1890ff' : '#52c41a'
+                                            }}
+                                            prefix={<Activity size={18} className="lg:w-5 lg:h-5"/>}
+                                        />
+                                    </Col>
+                                    <Col xs={12} sm={12}>
+                                        <div className="text-sm text-gray-500 mb-2">威胁等级</div>
+                                        <Tag
+                                            color={
+                                                auditResult.threatLevel === 'critical' || auditResult.threatLevel === 'high' ? 'error' :
+                                                    auditResult.threatLevel === 'medium' ? 'warning' : 'success'
+                                            }
+                                            className="text-base px-3 py-1"
+                                        >
+                                            {auditResult.threatLevel === 'critical' ? '严重风险' :
+                                                auditResult.threatLevel === 'high' ? '高风险' :
+                                                    auditResult.threatLevel === 'medium' ? '中风险' : '低风险'}
+                                        </Tag>
+                                    </Col>
+                                </Row>
+                                <div className="mt-4 text-sm text-gray-500">
+                                    最近审计时间: {dayjs(auditResult.startTime).format('YYYY-MM-DD HH:mm:ss')}
+                                </div>
+                            </Card>
+
+                            {/* 详细审计结果 */}
+                            <AuditResultView result={auditResult}/>
+                        </>
+                    )}
+                </Space>
+            ),
+        },
     ];
 
     return (
@@ -112,16 +318,6 @@ const AgentDetail = () => {
                 </Button>
 
                 <Space size={8}>
-                    {auditResult && (
-                        <Button
-                            icon={<Shield size={16}/>}
-                            onClick={() => navigate(`/admin/agents/${id}/audit`)}
-                            size="middle"
-                        >
-                            <span className="hidden sm:inline">查看审计结果</span>
-                            <span className="sm:hidden">审计</span>
-                        </Button>
-                    )}
                     <Dropdown
                         menu={{items: commandMenuItems}}
                         placement="bottomRight"
@@ -140,110 +336,47 @@ const AgentDetail = () => {
                 </Space>
             </div>
 
-            {/* 基本信息 */}
-            <div>
-                <Card
-                    title={
-                        <Space>
-                            <Activity size={20}/>
-                            <span className="font-semibold">探针信息</span>
-                            {agent?.status === 1 && <Tag color="success">在线</Tag>}
-                            {agent?.status !== 1 && <Tag color="error">离线</Tag>}
-                        </Space>
-                    }
-                    className="rounded-lg border border-gray-200 mt-0"
-                >
-                    <Descriptions column={{xs: 1, sm: 2}} bordered>
-                        <Descriptions.Item label="探针名称">{agent?.name}</Descriptions.Item>
-                        <Descriptions.Item label="探针ID">{agent?.id}</Descriptions.Item>
-                        <Descriptions.Item label="主机名">{agent?.hostname}</Descriptions.Item>
-                        <Descriptions.Item label="IP地址">{agent?.ip}</Descriptions.Item>
-                        <Descriptions.Item label="操作系统">
-                            <Tag color="blue">{agent?.os}</Tag>
-                        </Descriptions.Item>
-                        <Descriptions.Item label="系统架构">
-                            <Tag>{agent?.arch}</Tag>
-                        </Descriptions.Item>
-                        <Descriptions.Item label="探针版本">{agent?.version}</Descriptions.Item>
-                        <Descriptions.Item label="最后活跃时间">
-                            <Space>
-                                <Clock size={14}/>
-                                {agent?.lastSeenAt && dayjs(agent.lastSeenAt).format('YYYY-MM-DD HH:mm:ss')}
+            {/* 探针状态卡片 */}
+            <Card variant={'outlined'}>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                        <Activity size={32} className="text-blue-500"/>
+                        <div>
+                            <h2 className="text-xl font-semibold m-0">{agent?.name || agent?.hostname}</h2>
+                            <Space className="mt-1">
+                                <span className="text-gray-500">{agent?.hostname}</span>
+                                {agent?.status === 1 ? (
+                                    <Tag color="success">在线</Tag>
+                                ) : (
+                                    <Tag color="error">离线</Tag>
+                                )}
                             </Space>
-                        </Descriptions.Item>
-                        <Descriptions.Item label="创建时间">
-                            {agent?.createdAt && dayjs(agent.createdAt).format('YYYY-MM-DD HH:mm:ss')}
-                        </Descriptions.Item>
-                        <Descriptions.Item label="更新时间">
-                            {agent?.updatedAt && dayjs(agent.updatedAt).format('YYYY-MM-DD HH:mm:ss')}
-                        </Descriptions.Item>
-                    </Descriptions>
-                </Card>
-            </div>
+                        </div>
+                    </div>
+                    {auditResult && (
+                        <div className="text-center">
+                            <div className="text-sm text-gray-500">安全评分</div>
+                            <div className={`text-3xl font-bold ${
+                                auditResult.riskScore >= 80 ? 'text-red-500' :
+                                    auditResult.riskScore >= 50 ? 'text-orange-500' :
+                                        auditResult.riskScore >= 20 ? 'text-blue-500' : 'text-green-500'
+                            }`}>
+                                {100 - auditResult.riskScore}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </Card>
 
-            {/* 审计结果预览 */}
-            <div>
-                {auditResult && (
-                    <Card
-                        title={
-                            <Space>
-                                <Shield size={20}/>
-                                <span className="font-semibold">最近审计结果</span>
-                                <Tag color="blue">
-                                    {dayjs(auditResult.startTime).format('YYYY-MM-DD HH:mm')}
-                                </Tag>
-                            </Space>
-                        }
-                        className="rounded-lg border border-gray-200 mt-4 lg:mt-6"
-                        extra={
-                            <Button
-                                type="link"
-                                onClick={() => navigate(`/admin/agents/${id}/audit`)}
-                            >
-                                查看详情
-                            </Button>
-                        }
-                    >
-                        <Row gutter={[16, 16]}>
-                            <Col xs={12} sm={6}>
-                                <div className="text-center">
-                                    <div className="text-2xl font-semibold text-gray-900">
-                                        {auditResult.securityChecks.length}
-                                    </div>
-                                    <div className="text-sm text-gray-500 mt-1">总检查项</div>
-                                </div>
-                            </Col>
-                            <Col xs={12} sm={6}>
-                                <div className="text-center">
-                                    <div className="text-2xl font-semibold text-emerald-600">
-                                        {auditResult.securityChecks.filter(c => c.status === 'pass').length}
-                                    </div>
-                                    <div className="text-sm text-gray-500 mt-1">通过</div>
-                                </div>
-                            </Col>
-                            <Col xs={12} sm={6}>
-                                <div className="text-center">
-                                    <div className="text-2xl font-semibold text-rose-600">
-                                        {auditResult.securityChecks.filter(c => c.status === 'fail').length}
-                                    </div>
-                                    <div className="text-sm text-gray-500 mt-1">失败</div>
-                                </div>
-                            </Col>
-                            <Col xs={12} sm={6}>
-                                <div className="text-center">
-                                    <div className="text-2xl font-semibold text-orange-600">
-                                        {auditResult.securityChecks.filter(c => c.status === 'warn').length}
-                                    </div>
-                                    <div className="text-sm text-gray-500 mt-1">警告</div>
-                                </div>
-                            </Col>
-                        </Row>
-                    </Card>
-                )}
-            </div>
+            {/* Tabs 内容 */}
+            <Tabs
+                activeKey={activeTab}
+                onChange={setActiveTab}
+                items={tabItems}
+                size="large"
+            />
         </div>
     );
 };
 
 export default AgentDetail;
-

@@ -97,15 +97,6 @@ const MonitorList = () => {
 
     const monitorSummaries = monitors;
 
-    const lastUpdatedDisplay =
-        dataUpdatedAt && dataUpdatedAt > 0
-            ? new Date(dataUpdatedAt).toLocaleTimeString('zh-CN', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-            })
-            : '尚未刷新';
-
     const renderGridView = () => (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {monitorSummaries.map((stats) => {
@@ -221,100 +212,6 @@ const MonitorList = () => {
 
     const renderListView = () => (
         <>
-            {/* 移动端：使用卡片式布局 */}
-            <div className="flex flex-col gap-4 lg:hidden">
-                {monitorSummaries.map((stats) => {
-                    const hasCert = stats.certExpiryDate > 0;
-                    const certExpiringSoon = hasCert && stats.certExpiryDays < 30;
-
-                    return (
-                        <div
-                            key={stats.id}
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => navigate(`/monitors/${encodeURIComponent(stats.id)}`)}
-                            onKeyDown={(event) => {
-                                if (event.key === 'Enter' || event.key === ' ') {
-                                    event.preventDefault();
-                                    navigate(`/monitors/${encodeURIComponent(stats.id)}`);
-                                }
-                            }}
-                            className="cursor-pointer rounded-xl border border-slate-200 bg-white p-4 transition hover:border-blue-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
-                        >
-                            <div className="mb-3 flex items-start justify-between gap-2">
-                                <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <span className="text-base font-semibold text-slate-900">
-                                            {stats.name}
-                                        </span>
-                                        <StatusBadge status={stats.lastCheckStatus}/>
-                                    </div>
-                                    <p className="mt-1 text-sm text-slate-500 break-all">
-                                        {stats.showTargetPublic ? stats.target : '***'}
-                                    </p>
-                                    {stats.agentCount > 1 && (
-                                        <p className="mt-1 text-xs text-slate-400">
-                                            {stats.agentCount} 个探针
-                                        </p>
-                                    )}
-                                </div>
-                            </div>
-
-                            <div className="space-y-2">
-                                <div
-                                    className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <span className="text-xs font-medium text-slate-600">当前响应</span>
-                                    <span
-                                        className="text-sm font-bold text-slate-900">{formatTime(stats.currentResponse)}</span>
-                                </div>
-                                <div
-                                    className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <span className="text-xs font-medium text-slate-600">24h 平均响应</span>
-                                    <span
-                                        className="text-sm font-bold text-slate-900">{formatTime(stats.avgResponse24h)}</span>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <div className="mb-2 flex items-center justify-between">
-                                        <span className="text-xs font-medium text-slate-600">24h 在线率</span>
-                                        <span
-                                            className="text-xs font-bold text-slate-900">{formatPercentValue(stats.uptime24h)}%</span>
-                                    </div>
-                                    <UptimeBar uptime={stats.uptime24h}/>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                    <div className="mb-2 flex items-center justify-between">
-                                        <span className="text-xs font-medium text-slate-600">30d 在线率</span>
-                                        <span
-                                            className="text-xs font-bold text-slate-900">{formatPercentValue(stats.uptime30d)}%</span>
-                                    </div>
-                                    <UptimeBar uptime={stats.uptime30d}/>
-                                </div>
-                                {hasCert && (
-                                    <div
-                                        className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                        <div className="flex items-center gap-2">
-                                            <Shield
-                                                className={`h-4 w-4 ${certExpiringSoon ? 'text-yellow-600' : 'text-slate-600'}`}/>
-                                            <span className="text-xs font-medium text-slate-600">证书到期</span>
-                                        </div>
-                                        <div className="text-right">
-                                            <div
-                                                className={`text-xs font-medium ${certExpiringSoon ? 'text-yellow-700' : 'text-slate-700'}`}>
-                                                {formatDate(stats.certExpiryDate)}
-                                            </div>
-                                            <div
-                                                className={`text-xs ${certExpiringSoon ? 'text-yellow-600' : 'text-slate-500'}`}>
-                                                剩余 {stats.certExpiryDays} 天
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
-
             {/* 桌面端：使用表格布局 */}
             <div className="hidden overflow-hidden rounded-xl border border-slate-200 bg-white lg:block">
                 <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -435,8 +332,6 @@ const MonitorList = () => {
         return (
             <div className="min-h-screen bg-white text-slate-900 flex flex-col">
                 <PublicHeader
-                    title="服务监控"
-                    lastUpdated={lastUpdatedDisplay}
                     viewMode={viewMode}
                     onViewModeChange={setViewMode}
                     showViewToggle={true}
@@ -454,8 +349,6 @@ const MonitorList = () => {
     return (
         <div className="min-h-screen bg-white text-slate-900 flex flex-col">
             <PublicHeader
-                title="服务监控"
-                lastUpdated={lastUpdatedDisplay}
                 viewMode={viewMode}
                 onViewModeChange={setViewMode}
                 showViewToggle={true}

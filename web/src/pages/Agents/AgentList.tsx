@@ -3,7 +3,7 @@ import {useNavigate} from 'react-router-dom';
 import type {ActionType, ProColumns} from '@ant-design/pro-components';
 import {ProTable} from '@ant-design/pro-components';
 import {App, Button, DatePicker, Divider, Form, Input, Modal, Space, Tag} from 'antd';
-import {Edit, Eye, RefreshCw} from 'lucide-react';
+import {Edit, Eye, RefreshCw, Plus, Shield} from 'lucide-react';
 import {getAgentPaging, updateAgentInfo} from '../../api/agent';
 import type {Agent} from '../../types';
 import {getErrorMessage} from '../../lib/utils';
@@ -30,6 +30,7 @@ const AgentList = () => {
         });
         setEditModalVisible(true);
     };
+
 
     // 保存探针信息
     const handleSave = async () => {
@@ -167,10 +168,19 @@ const AgentList = () => {
             title: '操作',
             key: 'action',
             valueType: 'option',
-            width: 150,
+            width: 220,
             fixed: 'right',
             render: (_, record) => (
                 <Space>
+                    <Button
+                        type="link"
+                        icon={<Shield size={14}/>}
+                        onClick={() => navigate(`/admin/agents/${record.id}?tab=audit`)}
+                        style={{padding: 0, margin: 0, color: '#1890ff'}}
+                        title="安全审计"
+                    >
+                        审计
+                    </Button>
                     <Button
                         type="link"
                         icon={<Edit size={14}/>}
@@ -199,6 +209,13 @@ const AgentList = () => {
                 title="探针管理"
                 description="管理和监控系统探针状态"
                 actions={[
+                    {
+                        key: 'register',
+                        label: '注册探针',
+                        icon: <Plus size={16}/>,
+                        onClick: () => navigate('/admin/agents/deploy-guide'),
+                        type: 'primary',
+                    },
                     {
                         key: 'refresh',
                         label: '刷新',
