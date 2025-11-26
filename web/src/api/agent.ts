@@ -257,12 +257,28 @@ export interface SudoUserInfo {
     noPasswd: boolean;
 }
 
+export interface SSHConfig {
+    port: number;
+    permitRootLogin: string;
+    passwordAuthentication: boolean;
+    pubkeyAuthentication: boolean;
+    permitEmptyPasswords: boolean;
+    protocol?: string;
+    maxAuthTries?: number;
+    clientAliveInterval?: number;
+    clientAliveCountMax?: number;
+    x11Forwarding?: boolean;
+    usePAM?: boolean;
+    configFilePath?: string;
+}
+
 export interface UserAssets {
     systemUsers?: UserInfo[];
     loginHistory?: LoginRecord[];
     currentLogins?: LoginSession[];
     sshKeys?: SSHKeyInfo[];
     sudoUsers?: SudoUserInfo[];
+    sshConfig?: SSHConfig;
 }
 
 export interface LoginAssets {

@@ -44,6 +44,9 @@ func (uac *UserAssetsCollector) Collect() *protocol.UserAssets {
 	// 收集Sudo用户
 	assets.SudoUsers = uac.collectSudoUsers()
 
+	// 收集SSH配置
+	assets.SSHConfig = uac.collectSSHConfig()
+
 	// 统计信息
 	assets.Statistics = uac.calculateStatistics(assets)
 
@@ -367,6 +370,103 @@ func (uac *UserAssetsCollector) getAllUserDirectories() []string {
 	}
 
 	return dirs
+}
+
+// collectSSHConfig 收集SSH配置
+func (uac *UserAssetsCollector) collectSSHConfig() *protocol.SSHConfig {
+	configPath := "/etc/ssh/sshd_config"
+
+	// 检查配置文件是否存在
+	if _, err := os.Stat(configPath); err != nil {
+		globalLogger.Debug("SSH配置文件不存在: %v", err)
+		return nil
+	}
+
+	file, err := os.Open(configPath)
+	if err != nil {
+		globalLogger.Debug("读取SSH配置失败: %v", err)
+		return nil
+	}
+	defer file.Close()
+
+	// 默认值（OpenSSH默认配置）
+	config := &protocol.SSHConfig{
+		Port:                   22,
+		PermitRootLogin:        "prohibit-password", // 默认值因发行版而异
+		PasswordAuthentication: true,
+		PubkeyAuthentication:   true,
+		PermitEmptyPasswords:   false,
+		MaxAuthTries:           6,
+		ClientAliveInterval:    0,
+		ClientAliveCountMax:    3,
+		X11Forwarding:          false,
+		UsePAM:                 true,
+		ConfigFilePath:         configPath,
+	}
+
+	// 解析配置文件
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// 跳过注释和空行
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// 解析配置项
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+
+		key := strings.ToLower(fields[0])
+		value := strings.Join(fields[1:], " ")
+
+		switch key {
+		case "port":
+			if port := parseInt(value); port > 0 {
+				config.Port = port
+			}
+		case "permitrootlogin":
+			config.PermitRootLogin = strings.ToLower(value)
+		case "passwordauthentication":
+			config.PasswordAuthentication = parseBool(value)
+		case "pubkeyauthentication":
+			config.PubkeyAuthentication = parseBool(value)
+		case "permitemptypasswords":
+			config.PermitEmptyPasswords = parseBool(value)
+		case "protocol":
+			config.Protocol = value
+		case "maxauthtries":
+			if tries := parseInt(value); tries > 0 {
+				config.MaxAuthTries = tries
+			}
+		case "clientaliveinterval":
+			config.ClientAliveInterval = parseInt(value)
+		case "clientalivecountmax":
+			config.ClientAliveCountMax = parseInt(value)
+		case "x11forwarding":
+			config.X11Forwarding = parseBool(value)
+		case "usepam":
+			config.UsePAM = parseBool(value)
+		}
+	}
+
+	return config
+}
+
+// parseInt 解析整数
+func parseInt(s string) int {
+	var result int
+	fmt.Sscanf(s, "%d", &result)
+	return result
+}
+
+// parseBool 解析布尔值
+func parseBool(s string) bool {
+	s = strings.ToLower(s)
+	return s == "yes" || s == "true" || s == "1"
 }
 
 // calculateStatistics 计算统计信息

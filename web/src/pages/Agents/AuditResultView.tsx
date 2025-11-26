@@ -20,6 +20,7 @@ import {
 import type {VPSAuditResult, ProcessInfo, FileInfo, LoginRecord, LoginSession, SSHKeyInfo, SudoUserInfo} from '../../api/agent';
 import dayjs from 'dayjs';
 import duration from 'dayjs/plugin/duration';
+import React from 'react';
 
 dayjs.extend(duration);
 
@@ -36,6 +37,22 @@ interface AuditResultViewProps {
 }
 
 const AuditResultView = ({result}: AuditResultViewProps) => {
+    // 判断是否为内网IP
+    const isPrivateIP = (ip: string): boolean => {
+        if (!ip || ip === 'localhost') return true;
+
+        // IPv4 私有地址
+        const privateRanges = [
+            /^10\./,                    // 10.0.0.0/8
+            /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
+            /^192\.168\./,              // 192.168.0.0/16
+            /^127\./,                   // 127.0.0.0/8 (loopback)
+            /^169\.254\./,              // 169.254.0.0/16 (link-local)
+        ];
+
+        return privateRanges.some(range => range.test(ip));
+    };
+
     const analyzeRisks = (result: VPSAuditResult): RiskItem[] => {
         const risks: RiskItem[] = [];
 
@@ -67,47 +84,118 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
             });
         }
 
-        // 4. Loginable Users with No Password
-        const noPwdUsers = result.assetInventory.userAssets?.systemUsers?.filter(u => u.isLoginable && !u.hasPassword);
+        // 4. Loginable Users with No Password (排除系统用户)
+        const systemUsernames = ['sync', 'shutdown', 'halt', 'daemon', 'bin', 'sys', 'adm', 'games', 'ftp', 'nobody', 'systemd-network', 'systemd-resolve'];
+        const noPwdUsers = result.assetInventory.userAssets?.systemUsers?.filter(u => {
+            // 必须可登录且无密码
+            if (!u.isLoginable || u.hasPassword) return false;
+
+            // 排除系统用户 (UID < 1000)
+            const uid = parseInt(u.uid);
+            if (!isNaN(uid) && uid < 1000) return false;
+
+            // 排除常见系统用户名
+            if (systemUsernames.includes(u.username)) return false;
+
+            return true;
+        });
+
         if (noPwdUsers?.length) {
             risks.push({
                 level: 'medium',
                 title: '存在无密码可登录用户',
-                description: `发现 ${noPwdUsers.length} 个用户无密码且可登录: ${noPwdUsers.map(u => u.username).join(', ')}`
+                description: `发现 ${noPwdUsers.length} 个普通用户无密码且可登录: ${noPwdUsers.map(u => u.username).join(', ')}`
             });
         }
 
         // 5. Failed Login Attempts
         const failedLogins = result.assetInventory.loginAssets?.failedLogins?.length || 0;
-        if (failedLogins > 50) {
+        if (failedLogins > 100) {
             risks.push({
                 level: 'high',
                 title: '存在大量失败登录尝试',
                 description: `发现 ${failedLogins} 次失败登录尝试，可能存在暴力破解攻击`
             });
-        } else if (failedLogins > 20) {
+        } else if (failedLogins > 50) {
             risks.push({
                 level: 'medium',
                 title: '存在失败登录尝试',
-                description: `发现 ${failedLogins} 次失败登录尝试`
+                description: `发现 ${failedLogins} 次失败登录尝试，建议检查日志`
             });
         }
 
-        // 6. High Frequency Login IPs
+        // 6. SSH Configuration Security Issues
+        const sshConfig = result.assetInventory.userAssets?.sshConfig;
+        if (sshConfig) {
+            // 允许root密码登录
+            if (sshConfig.permitRootLogin === 'yes' && sshConfig.passwordAuthentication) {
+                risks.push({
+                    level: 'high',
+                    title: 'SSH允许root密码登录',
+                    description: 'SSH配置允许root用户使用密码登录，存在被暴力破解的风险，建议设置为 prohibit-password 或 no'
+                });
+            }
+
+            // 允许空密码登录
+            if (sshConfig.permitEmptyPasswords) {
+                risks.push({
+                    level: 'critical',
+                    title: 'SSH允许空密码登录',
+                    description: 'SSH配置允许空密码登录，严重的安全隐患！'
+                });
+            }
+
+            // 仅使用密码认证，没有启用公钥认证
+            if (sshConfig.passwordAuthentication && !sshConfig.pubkeyAuthentication) {
+                risks.push({
+                    level: 'medium',
+                    title: 'SSH仅启用密码认证',
+                    description: 'SSH配置仅启用密码认证，建议启用公钥认证以提高安全性'
+                });
+            }
+
+            // 使用旧协议
+            if (sshConfig.protocol && sshConfig.protocol.includes('1')) {
+                risks.push({
+                    level: 'high',
+                    title: 'SSH使用不安全的协议版本',
+                    description: 'SSH配置使用Protocol 1，存在安全漏洞，应仅使用Protocol 2'
+                });
+            }
+        }
+
+        // 7. High Frequency Login IPs (区分内外网)
         if (result.assetInventory.loginAssets?.successfulLogins) {
-            const ipCount: Record<string, number> = {};
+            const publicIPCount: Record<string, number> = {};
+            const privateIPCount: Record<string, number> = {};
+
             result.assetInventory.loginAssets.successfulLogins.forEach(login => {
-                if (login.ip && login.ip !== 'localhost') {
-                    ipCount[login.ip] = (ipCount[login.ip] || 0) + 1;
+                if (!login.ip || login.ip === 'localhost') return;
+
+                if (isPrivateIP(login.ip)) {
+                    privateIPCount[login.ip] = (privateIPCount[login.ip] || 0) + 1;
+                } else {
+                    publicIPCount[login.ip] = (publicIPCount[login.ip] || 0) + 1;
                 }
             });
 
-            const highFreqIPs = Object.entries(ipCount).filter(([_, count]) => count > 30);
-            if (highFreqIPs.length > 0) {
+            // 外网IP：超过20次就警告
+            const highFreqPublicIPs = Object.entries(publicIPCount).filter(([_, count]) => count > 20);
+            if (highFreqPublicIPs.length > 0) {
                 risks.push({
                     level: 'medium',
-                    title: '发现高频登录IP',
-                    description: `以下IP登录次数异常频繁: ${highFreqIPs.map(([ip, count]) => `${ip}(${count}次)`).join(', ')}`
+                    title: '发现高频外网IP登录',
+                    description: `以下公网IP登录次数较多: ${highFreqPublicIPs.map(([ip, count]) => `${ip}(${count}次)`).join(', ')}`
+                });
+            }
+
+            // 内网IP：超过100次才警告（内网环境下频繁登录是正常的）
+            const highFreqPrivateIPs = Object.entries(privateIPCount).filter(([_, count]) => count > 100);
+            if (highFreqPrivateIPs.length > 0) {
+                risks.push({
+                    level: 'low',
+                    title: '内网IP登录次数较多',
+                    description: `以下内网IP登录次数较多: ${highFreqPrivateIPs.map(([ip, count]) => `${ip}(${count}次)`).join(', ')}`
                 });
             }
         }
@@ -334,9 +422,20 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
         {title: '文件路径', dataIndex: 'filePath', key: 'filePath', width: 200, ellipsis: true},
     ];
 
+    const [showAllServices, setShowAllServices] = React.useState(false);
+
     const serviceColumns = [
         {title: '服务名', dataIndex: 'name', key: 'name'},
-        {title: '状态', dataIndex: 'state', key: 'state', width: 100},
+        {
+            title: '状态',
+            dataIndex: 'state',
+            key: 'state',
+            width: 100,
+            render: (state: string) => {
+                const color = state === 'active' ? 'success' : state === 'failed' ? 'error' : 'default';
+                return <Tag color={color}>{state || '-'}</Tag>;
+            }
+        },
         {
             title: '开机启动',
             dataIndex: 'enabled',
@@ -347,6 +446,15 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
         {title: '启动命令', dataIndex: 'execStart', key: 'execStart', ellipsis: true},
         {title: '描述', dataIndex: 'description', key: 'description', ellipsis: true},
     ];
+
+    // 过滤 systemd 服务
+    const filteredServices = React.useMemo(() => {
+        const services = result.assetInventory.fileAssets?.systemdServices || [];
+        if (showAllServices) {
+            return services;
+        }
+        return services.filter(s => s.state === 'active');
+    }, [result.assetInventory.fileAssets?.systemdServices, showAllServices]);
 
     const startupScriptColumns = [
         {title: '类型', dataIndex: 'type', key: 'type', width: 150},
@@ -598,6 +706,59 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
                                             <Empty description="无当前登录会话"/>
                                         )}
                                     </Card>
+                                    {result.assetInventory.userAssets?.sshConfig && (
+                                        <Card size="small" title="SSH 配置">
+                                            <Descriptions size="small" column={2} bordered>
+                                                <Descriptions.Item label="SSH端口">
+                                                    {result.assetInventory.userAssets.sshConfig.port}
+                                                    {result.assetInventory.userAssets.sshConfig.port !== 22 && (
+                                                        <Tag color="warning" className="ml-2">非标准端口</Tag>
+                                                    )}
+                                                </Descriptions.Item>
+                                                <Descriptions.Item label="Root登录">
+                                                    {result.assetInventory.userAssets.sshConfig.permitRootLogin === 'yes' ? (
+                                                        <Tag color="error">允许</Tag>
+                                                    ) : result.assetInventory.userAssets.sshConfig.permitRootLogin === 'prohibit-password' ? (
+                                                        <Tag color="success">仅密钥</Tag>
+                                                    ) : (
+                                                        <Tag color="success">禁止</Tag>
+                                                    )}
+                                                </Descriptions.Item>
+                                                <Descriptions.Item label="密码认证">
+                                                    {result.assetInventory.userAssets.sshConfig.passwordAuthentication ? (
+                                                        <Tag color="warning">启用</Tag>
+                                                    ) : (
+                                                        <Tag color="success">禁用</Tag>
+                                                    )}
+                                                </Descriptions.Item>
+                                                <Descriptions.Item label="公钥认证">
+                                                    {result.assetInventory.userAssets.sshConfig.pubkeyAuthentication ? (
+                                                        <Tag color="success">启用</Tag>
+                                                    ) : (
+                                                        <Tag color="warning">禁用</Tag>
+                                                    )}
+                                                </Descriptions.Item>
+                                                <Descriptions.Item label="空密码登录">
+                                                    {result.assetInventory.userAssets.sshConfig.permitEmptyPasswords ? (
+                                                        <Tag color="error">允许</Tag>
+                                                    ) : (
+                                                        <Tag color="success">禁止</Tag>
+                                                    )}
+                                                </Descriptions.Item>
+                                                <Descriptions.Item label="最大认证尝试">
+                                                    {result.assetInventory.userAssets.sshConfig.maxAuthTries || '-'}
+                                                </Descriptions.Item>
+                                                {result.assetInventory.userAssets.sshConfig.protocol && (
+                                                    <Descriptions.Item label="协议版本" span={2}>
+                                                        {result.assetInventory.userAssets.sshConfig.protocol}
+                                                        {result.assetInventory.userAssets.sshConfig.protocol.includes('1') && (
+                                                            <Tag color="error" className="ml-2">不安全</Tag>
+                                                        )}
+                                                    </Descriptions.Item>
+                                                )}
+                                            </Descriptions>
+                                        </Card>
+                                    )}
                                 </Space>
                             ),
                         },
@@ -645,17 +806,34 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
                                             <Empty description="无定时任务"/>
                                         )}
                                     </Card>
-                                    <Card size="small" title={<Space><Settings size={16}/>Systemd服务</Space>}>
-                                        {result.assetInventory.fileAssets?.systemdServices?.length ? (
+                                    <Card
+                                        size="small"
+                                        title={<Space><Settings size={16}/>Systemd服务</Space>}
+                                        extra={
+                                            <Space>
+                                                <span className="text-gray-500 text-sm">
+                                                    共 {result.assetInventory.fileAssets?.systemdServices?.length || 0} 个服务
+                                                    {!showAllServices && ` (显示 ${filteredServices.length} 个活跃服务)`}
+                                                </span>
+                                                <button
+                                                    onClick={() => setShowAllServices(!showAllServices)}
+                                                    className="text-blue-500 hover:text-blue-700 text-sm"
+                                                >
+                                                    {showAllServices ? '仅显示活跃' : '显示全部'}
+                                                </button>
+                                            </Space>
+                                        }
+                                    >
+                                        {filteredServices.length ? (
                                             <Table
                                                 size="small"
-                                                dataSource={result.assetInventory.fileAssets.systemdServices}
+                                                dataSource={filteredServices}
                                                 columns={serviceColumns}
                                                 rowKey="name"
                                                 pagination={false}
                                             />
                                         ) : (
-                                            <Empty description="无Systemd服务"/>
+                                            <Empty description={showAllServices ? "无Systemd服务" : "无活跃的Systemd服务"}/>
                                         )}
                                     </Card>
                                     <Card size="small" title={<Space><PlayCircle size={16}/>启动脚本</Space>}>

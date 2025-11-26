@@ -141,8 +141,8 @@ func (fac *FileAssetsCollector) parseCronFile(filePath string, defaultUser strin
 func (fac *FileAssetsCollector) collectSystemdServices() []protocol.SystemdService {
 	var services []protocol.SystemdService
 
-	// 使用 systemctl list-units
-	output, err := fac.executor.Execute("systemctl", "list-units", "--type=service", "--all", "--no-pager")
+	// 使用 systemctl list-units 获取服务列表
+	output, err := fac.executor.Execute("systemctl", "list-units", "--type=service", "--all", "--no-pager", "--no-legend")
 	if err != nil {
 		globalLogger.Debug("获取systemd服务失败: %v", err)
 		return services
@@ -151,7 +151,7 @@ func (fac *FileAssetsCollector) collectSystemdServices() []protocol.SystemdServi
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "UNIT") || strings.HasPrefix(line, "●") {
+		if line == "" {
 			continue
 		}
 
@@ -165,26 +165,94 @@ func (fac *FileAssetsCollector) collectSystemdServices() []protocol.SystemdServi
 			continue
 		}
 
-		state := ""
-		if len(fields) > 2 {
-			state = fields[2]
+		// 加载状态和活动状态
+		loadState := fields[1]   // loaded/not-found
+		activeState := fields[2] // active/inactive/failed
+		// subState := fields[3]    // running/dead/exited (目前未使用)
+
+		// 获取服务的详细信息
+		service := protocol.SystemdService{
+			Name:  serviceName,
+			State: activeState,
 		}
 
-		service := protocol.SystemdService{
-			Name:    serviceName,
-			State:   state,
-			Enabled: strings.Contains(line, "enabled"),
+		// 判断是否启用（开机自启）
+		if loadState == "loaded" {
+			enabledOutput, err := fac.executor.Execute("systemctl", "is-enabled", serviceName)
+			if err == nil {
+				enabledStatus := strings.TrimSpace(enabledOutput)
+				service.Enabled = enabledStatus == "enabled"
+			}
 		}
+
+		// 获取服务详细信息
+		fac.enrichServiceInfo(&service)
 
 		services = append(services, service)
 
 		// 限制数量
-		if len(services) >= 100 {
+		if len(services) >= 150 {
 			break
 		}
 	}
 
 	return services
+}
+
+// enrichServiceInfo 丰富服务信息
+func (fac *FileAssetsCollector) enrichServiceInfo(service *protocol.SystemdService) {
+	// 使用 systemctl show 获取详细信息
+	output, err := fac.executor.Execute("systemctl", "show", service.Name, "--no-pager")
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// 解析 Key=Value 格式
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := parts[0]
+		value := parts[1]
+
+		switch key {
+		case "Description":
+			service.Description = value
+		case "ExecStart":
+			// ExecStart 格式: { path=/usr/bin/xxx ; argv[]=/usr/bin/xxx ... }
+			// 提取可执行路径
+			if strings.Contains(value, "path=") {
+				start := strings.Index(value, "path=")
+				if start != -1 {
+					start += 5
+					end := strings.Index(value[start:], " ")
+					if end != -1 {
+						service.ExecStart = value[start : start+end]
+					} else {
+						// 可能到结尾了
+						end = strings.Index(value[start:], ";")
+						if end != -1 {
+							service.ExecStart = value[start : start+end]
+						}
+					}
+				}
+			}
+			// 如果没有 path=，尝试直接提取
+			if service.ExecStart == "" && value != "" {
+				service.ExecStart = value
+			}
+		case "FragmentPath":
+			service.UnitFile = value
+		}
+	}
 }
 
 // collectStartupScripts 收集启动脚本

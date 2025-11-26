@@ -80,18 +80,8 @@ func (lac *LoginAssetsCollector) collectSuccessfulLogins() []protocol.LoginRecor
 			ip = "localhost" + ip
 		}
 
-		// 解析登录时间（简化处理）
-		timestamp := time.Now().UnixMilli()
-		if len(fields) >= 4 {
-			// 尝试解析时间字段
-			// 格式通常是: Mon Dec 25 10:30:00 2023
-			if len(fields) >= 8 {
-				timeStr := strings.Join(fields[3:8], " ")
-				if t, err := time.Parse("Mon Jan _2 15:04:05 2006", timeStr); err == nil {
-					timestamp = t.UnixMilli()
-				}
-			}
-		}
+		// 解析登录时间
+		timestamp := lac.parseLoginTime(fields)
 
 		record := protocol.LoginRecord{
 			Username:  username,
@@ -110,6 +100,38 @@ func (lac *LoginAssetsCollector) collectSuccessfulLogins() []protocol.LoginRecor
 	}
 
 	return records
+}
+
+// parseLoginTime 解析登录时间
+func (lac *LoginAssetsCollector) parseLoginTime(fields []string) int64 {
+	// last -F 输出格式示例:
+	// username pts/0 192.168.1.1 Mon Dec 25 10:30:00 2023 - Mon Dec 25 11:00:00 2023
+	// 时间在第4-8个字段
+
+	if len(fields) < 8 {
+		return time.Now().UnixMilli()
+	}
+
+	// 尝试多种时间格式
+	timeFormats := []string{
+		"Mon Jan _2 15:04:05 2006", // 标准格式
+		"Mon Jan 2 15:04:05 2006",  // 不带下划线
+		"2006-01-02 15:04:05",      // ISO格式
+	}
+
+	// 从第3个字段开始（索引2），因为前面是 username terminal ip
+	timeStr := strings.Join(fields[3:8], " ")
+
+	for _, format := range timeFormats {
+		if t, err := time.Parse(format, timeStr); err == nil {
+			// 使用本地时区解析时间
+			return t.UnixMilli()
+		}
+	}
+
+	// 如果解析失败，返回当前时间
+	globalLogger.Debug("无法解析登录时间: %s", timeStr)
+	return time.Now().UnixMilli()
 }
 
 // collectFailedLogins 收集失败登录历史
@@ -150,13 +172,7 @@ func (lac *LoginAssetsCollector) collectFailedLogins() []protocol.LoginRecord {
 		}
 
 		// 解析登录时间
-		timestamp := time.Now().UnixMilli()
-		if len(fields) >= 8 {
-			timeStr := strings.Join(fields[3:8], " ")
-			if t, err := time.Parse("Mon Jan _2 15:04:05 2006", timeStr); err == nil {
-				timestamp = t.UnixMilli()
-			}
-		}
+		timestamp := lac.parseLoginTime(fields)
 
 		record := protocol.LoginRecord{
 			Username:  username,
@@ -255,13 +271,49 @@ func (lac *LoginAssetsCollector) parseFailedLoginFromLog(line string) *protocol.
 		}
 	}
 
+	// 尝试解析日志时间
+	// syslog 格式: Dec 25 10:30:00
+	timestamp := lac.parseSyslogTime(line)
+
 	return &protocol.LoginRecord{
 		Username:  username,
 		IP:        ip,
 		Terminal:  "ssh",
-		Timestamp: time.Now().UnixMilli(),
+		Timestamp: timestamp,
 		Status:    "failed",
 	}
+}
+
+// parseSyslogTime 解析syslog时间格式
+func (lac *LoginAssetsCollector) parseSyslogTime(line string) int64 {
+	// syslog 时间格式通常在行首: Dec 25 10:30:00
+	fields := strings.Fields(line)
+	if len(fields) < 3 {
+		return time.Now().UnixMilli()
+	}
+
+	// 获取当前年份（syslog不包含年份）
+	currentYear := time.Now().Year()
+
+	// 尝试解析: Month Day Time
+	timeStr := fmt.Sprintf("%s %s %s %d", fields[0], fields[1], fields[2], currentYear)
+
+	formats := []string{
+		"Jan _2 15:04:05 2006",
+		"Jan 2 15:04:05 2006",
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, timeStr); err == nil {
+			// 如果解析的时间比当前时间晚，说明是去年的日志
+			if t.After(time.Now()) {
+				t = t.AddDate(-1, 0, 0)
+			}
+			return t.UnixMilli()
+		}
+	}
+
+	return time.Now().UnixMilli()
 }
 
 // collectCurrentSessions 收集当前登录会话

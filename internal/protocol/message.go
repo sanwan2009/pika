@@ -467,6 +467,7 @@ type UserAssets struct {
 	CurrentLogins []LoginSession  `json:"currentLogins,omitempty"` // 当前登录
 	SSHKeys       []SSHKeyInfo    `json:"sshKeys,omitempty"`       // SSH密钥
 	SudoUsers     []SudoUserInfo  `json:"sudoUsers,omitempty"`     // Sudo用户
+	SSHConfig     *SSHConfig      `json:"sshConfig,omitempty"`     // SSH配置
 	Statistics    *UserStatistics `json:"statistics,omitempty"`    // 统计信息
 }
 
@@ -515,6 +516,22 @@ type SudoUserInfo struct {
 	Username string `json:"username"`        // 用户名
 	Rules    string `json:"rules,omitempty"` // 规则
 	NoPasswd bool   `json:"noPasswd"`        // 是否免密
+}
+
+// SSHConfig SSH配置信息
+type SSHConfig struct {
+	Port                   int    `json:"port"`                          // SSH端口
+	PermitRootLogin        string `json:"permitRootLogin"`               // 是否允许root登录 (yes/no/prohibit-password)
+	PasswordAuthentication bool   `json:"passwordAuthentication"`        // 是否允许密码认证
+	PubkeyAuthentication   bool   `json:"pubkeyAuthentication"`          // 是否允许公钥认证
+	PermitEmptyPasswords   bool   `json:"permitEmptyPasswords"`          // 是否允许空密码
+	Protocol               string `json:"protocol,omitempty"`            // 协议版本
+	MaxAuthTries           int    `json:"maxAuthTries,omitempty"`        // 最大认证尝试次数
+	ClientAliveInterval    int    `json:"clientAliveInterval,omitempty"` // 客户端保活间隔
+	ClientAliveCountMax    int    `json:"clientAliveCountMax,omitempty"` // 客户端保活最大次数
+	X11Forwarding          bool   `json:"x11Forwarding,omitempty"`       // 是否允许X11转发
+	UsePAM                 bool   `json:"usePAM,omitempty"`              // 是否使用PAM
+	ConfigFilePath         string `json:"configFilePath,omitempty"`      // 配置文件路径
 }
 
 // UserStatistics 用户统计
