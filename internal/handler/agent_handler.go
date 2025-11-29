@@ -513,7 +513,7 @@ func (h *AgentHandler) GetAgents(c echo.Context) error {
 		if a.Status == b.Status {
 			return strings.Compare(a.Name, b.Name)
 		}
-		return strings.Compare(strconv.Itoa(a.Status), strconv.Itoa(b.Status))
+		return strings.Compare(strconv.Itoa(b.Status), strconv.Itoa(a.Status))
 	})
 
 	// 添加连接状态和最新指标
