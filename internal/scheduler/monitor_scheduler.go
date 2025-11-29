@@ -189,10 +189,8 @@ func (s *MonitorScheduler) executeTask(task *MonitorTask) {
 // reloadTasks 重新加载任务列表
 func (s *MonitorScheduler) reloadTasks() {
 	// 获取所有启用的监控任务
-	var monitors []models.MonitorTask
-	if err := s.monitorService.MonitorRepo.GetDB(s.ctx).
-		Where("enabled = ?", true).
-		Find(&monitors).Error; err != nil {
+	monitors, err := s.monitorService.FindByEnabled(context.Background(), true)
+	if err != nil {
 		s.logger.Error("加载监控任务失败", zap.Error(err))
 		return
 	}

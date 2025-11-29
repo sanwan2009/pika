@@ -32,11 +32,13 @@ type MonitorService struct {
 func NewMonitorService(logger *zap.Logger, db *gorm.DB, wsManager *ws.Manager) *MonitorService {
 	return &MonitorService{
 		logger:           logger,
+		Service:          orz.NewService(db),
 		MonitorRepo:      repo.NewMonitorRepo(db),
 		agentRepo:        repo.NewAgentRepo(db),
 		metricRepo:       repo.NewMetricRepo(db),
 		monitorStatsRepo: repo.NewMonitorStatsRepo(db),
-		wsManager:        wsManager,
+
+		wsManager: wsManager,
 	}
 }
 

@@ -14,17 +14,8 @@ import {
     TrendingUp
 } from 'lucide-react';
 import type {TooltipProps} from 'recharts';
-import {
-    Area,
-    AreaChart,
-    CartesianGrid,
-    Legend,
-    ResponsiveContainer,
-    Tooltip,
-    XAxis,
-    YAxis,
-} from 'recharts';
-import {getMonitorStatsById, getMonitorHistory, type AggregatedMonitorMetric} from '../../api/monitor';
+import {Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis,} from 'recharts';
+import {type AggregatedMonitorMetric, getMonitorHistory, getMonitorStatsById} from '../../api/monitor';
 import type {MonitorStats} from '../../types';
 
 const formatTime = (ms: number): string => {
@@ -70,7 +61,8 @@ const LoadingSpinner = () => (
 const EmptyState = ({message = '监控数据不存在'}: { message?: string }) => (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-slate-950">
         <div className="flex flex-col items-center gap-3 text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-900 text-slate-400 dark:text-slate-300">
+            <div
+                className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-900 text-slate-400 dark:text-slate-300">
                 <Shield className="h-8 w-8"/>
             </div>
             <p className="text-sm text-slate-500 dark:text-slate-400">{message}</p>
@@ -111,13 +103,16 @@ const Card = ({
     action?: ReactNode;
     children: ReactNode;
 }) => (
-    <section className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/60 p-6 shadow-sm">
+    <section
+        className="rounded-3xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/60 p-6 shadow-sm">
         {(title || description || action) && (
             <div
                 className="flex flex-col gap-3 border-b border-slate-100 dark:border-slate-800 pb-4 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                    {title ? <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">{title}</h2> : null}
-                    {description ? <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{description}</p> : null}
+                    {title ?
+                        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">{title}</h2> : null}
+                    {description ?
+                        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{description}</p> : null}
                 </div>
                 {action ? <div className="shrink-0">{action}</div> : null}
             </div>
@@ -142,7 +137,8 @@ const StatusBadge = ({status}: { status: string }) => {
     }
 
     return (
-        <div className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium ${containerClass}`}>
+        <div
+            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium ${containerClass}`}>
             {icon}
             {label}
         </div>
@@ -196,7 +192,8 @@ const StatCard = ({icon, label, value, color = 'blue'}: {
     const theme = statThemes[color as keyof typeof statThemes] ?? statThemes.blue;
 
     return (
-        <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/60 p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg dark:hover:shadow-slate-950/70">
+        <div
+            className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/60 p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg dark:hover:shadow-slate-950/70">
             <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-3">
                     <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${theme.icon}`}>
@@ -215,13 +212,18 @@ const StatCard = ({icon, label, value, color = 'blue'}: {
     );
 };
 
-const CustomTooltip = ({active, payload, label, unit = ' ms'}: TooltipProps<number, string> & { unit?: string; label?: string; payload?: any[] }) => {
+const CustomTooltip = ({active, payload, label, unit = ' ms'}: TooltipProps<number, string> & {
+    unit?: string;
+    label?: string;
+    payload?: any[]
+}) => {
     if (!active || !payload || payload.length === 0) {
         return null;
     }
 
     return (
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs shadow-lg dark:shadow-slate-950/50">
+        <div
+            className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2 text-xs shadow-lg dark:shadow-slate-950/50">
             <p className="font-semibold text-slate-700 dark:text-slate-200">{label}</p>
             <div className="mt-1 space-y-1">
                 {payload.map((entry, index) => {
@@ -239,7 +241,8 @@ const CustomTooltip = ({active, payload, label, unit = ' ms'}: TooltipProps<numb
                             : entry.value;
 
                     return (
-                        <p key={`${entry.dataKey ?? index}`} className="flex items-center gap-2 text-slate-600 dark:text-slate-400">
+                        <p key={`${entry.dataKey ?? index}`}
+                           className="flex items-center gap-2 text-slate-600 dark:text-slate-400">
                             <span
                                 className="inline-block h-2 w-2 rounded-full"
                                 style={{backgroundColor: dotColor}}
@@ -408,8 +411,10 @@ const MonitorDetail = () => {
         <div className="bg-slate-50 dark:bg-slate-900">
             <div className="mx-auto flex max-w-7xl flex-col px-4 pb-10 pt-6 sm:px-6 lg:px-8">
                 {/* Hero Section */}
-                <section className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 p-6 text-white shadow-xl">
-                    <div className="absolute inset-0 opacity-30 [background-image:radial-gradient(circle_at_top,rgba(255,255,255,0.35),transparent_55%)]"/>
+                <section
+                    className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 p-6 text-white shadow-xl">
+                    <div
+                        className="absolute inset-0 opacity-30 [background-image:radial-gradient(circle_at_top,rgba(255,255,255,0.35),transparent_55%)]"/>
                     <div className="relative flex flex-col gap-6">
                         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
                             <div className="space-y-4">
@@ -422,7 +427,8 @@ const MonitorDetail = () => {
                                     返回监控列表
                                 </button>
                                 <div className="flex items-start gap-4">
-                                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/10 text-white">
+                                    <div
+                                        className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/10 text-white">
                                         {firstStat.type === 'tcp' ? (
                                             <ServerIcon className="h-7 w-7"/>
                                         ) : (
@@ -529,7 +535,8 @@ const MonitorDetail = () => {
                                         }`}>
                                             证书到期时间: {formatDate(firstStat.certExpiryDate)}
                                             {certExpired ? (
-                                                <span className="ml-1">(已过期 {Math.abs(firstStat.certExpiryDays)} 天)</span>
+                                                <span
+                                                    className="ml-1">(已过期 {Math.abs(firstStat.certExpiryDays)} 天)</span>
                                             ) : (
                                                 <span className="ml-1">(剩余 {firstStat.certExpiryDays} 天)</span>
                                             )}
@@ -556,7 +563,8 @@ const MonitorDetail = () => {
                         description="监控各探针的响应时间变化"
                         action={
                             <div className="flex flex-wrap items-center gap-2">
-                                <TimeRangeSelector value={timeRange} onChange={setTimeRange} options={timeRangeOptions}/>
+                                <TimeRangeSelector value={timeRange} onChange={setTimeRange}
+                                                   options={timeRangeOptions}/>
                                 {availableAgents.length > 0 && (
                                     <select
                                         value={selectedAgent}
@@ -582,14 +590,16 @@ const MonitorDetail = () => {
                                             const agentKey = `agent_${stat.agentId}`;
                                             const color = AGENT_COLORS[index % AGENT_COLORS.length];
                                             return (
-                                                <linearGradient key={agentKey} id={`gradient_${agentKey}`} x1="0" y1="0" x2="0" y2="1">
+                                                <linearGradient key={agentKey} id={`gradient_${agentKey}`} x1="0" y1="0"
+                                                                x2="0" y2="1">
                                                     <stop offset="5%" stopColor={color} stopOpacity={0.3}/>
                                                     <stop offset="95%" stopColor={color} stopOpacity={0}/>
                                                 </linearGradient>
                                             );
                                         })}
                                     </defs>
-                                    <CartesianGrid stroke="currentColor" strokeDasharray="4 4" className="stroke-slate-200 dark:stroke-slate-700"/>
+                                    <CartesianGrid stroke="currentColor" strokeDasharray="4 4"
+                                                   className="stroke-slate-200 dark:stroke-slate-700"/>
                                     <XAxis
                                         dataKey="time"
                                         stroke="currentColor"
@@ -605,7 +615,12 @@ const MonitorDetail = () => {
                                     <Tooltip content={<CustomTooltip unit=" ms"/>} wrapperStyle={{
                                         zIndex: 50,
                                     }}/>
-                                    <Legend/>
+                                    <Legend
+                                        wrapperStyle={{
+                                            display: 'none',
+                                        }}
+                                        className="hidden sm:block"
+                                    />
                                     {monitorStats
                                         .filter(stat => selectedAgent === 'all' || stat.agentId === selectedAgent)
                                         .map((stat) => {
@@ -639,98 +654,111 @@ const MonitorDetail = () => {
 
                     {/* 各探针详细数据 */}
                     <Card title="探针监控详情" description="各探针的当前状态和统计数据">
-                        <div className="overflow-x-auto">
-                            <table className="w-full">
-                                <thead className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70">
-                                <tr>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        探针 ID
-                                    </th>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        状态
-                                    </th>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        当前响应
-                                    </th>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        24h 在线率
-                                    </th>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        30d 在线率
-                                    </th>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        24h 检测
-                                    </th>
-                                    <th className="px-6 py-4 text-left text-sm font-semibold text-slate-700 dark:text-slate-300">
-                                        最后检测
-                                    </th>
-                                </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                                {monitorStats.map((stats, index) => {
-                                    const color = AGENT_COLORS[index % AGENT_COLORS.length];
-                                    return (
-                                        <tr key={stats.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800">
-                                            <td className="px-6 py-4">
-                                                <div className="flex items-center gap-2">
-                                                    <span
-                                                        className="inline-block h-3 w-3 rounded-full"
-                                                        style={{backgroundColor: color}}
-                                                    />
-                                                    <div className="flex flex-col">
-                                                        {stats.agentName ? (
-                                                            <>
-                                                                <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                                                                    {stats.agentName}
-                                                                </span>
-                                                                <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                        <div className="overflow-x-auto -mx-6 sm:mx-0">
+                            <div className="inline-block min-w-full align-middle">
+                                <div className="overflow-hidden">
+                                    <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-800">
+                                        <thead className="bg-slate-50 dark:bg-slate-900/70">
+                                        <tr>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                                探针 ID
+                                            </th>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                                状态
+                                            </th>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                                当前响应
+                                            </th>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300">
+                                                24h 在线率
+                                            </th>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300 hidden lg:table-cell">
+                                                30d 在线率
+                                            </th>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300 hidden md:table-cell">
+                                                24h 检测
+                                            </th>
+                                            <th className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300 hidden xl:table-cell">
+                                                最后检测
+                                            </th>
+                                        </tr>
+                                        </thead>
+                                        <tbody
+                                            className="divide-y divide-slate-100 dark:divide-slate-700 bg-white dark:bg-slate-900">
+                                        {monitorStats.map((stats, index) => {
+                                            const color = AGENT_COLORS[index % AGENT_COLORS.length];
+                                            return (
+                                                <tr key={stats.id}
+                                                    className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800">
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4">
+                                                        <div className="flex items-center gap-2">
+                                                        <span
+                                                            className="inline-block h-2 w-2 sm:h-3 sm:w-3 rounded-full flex-shrink-0"
+                                                            style={{backgroundColor: color}}
+                                                        />
+                                                            <div className="flex flex-col min-w-0">
+                                                                {stats.agentName ? (
+                                                                    <>
+                                                                    <span
+                                                                        className="text-xs sm:text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
+                                                                        {stats.agentName}
+                                                                    </span>
+                                                                        <span
+                                                                            className="font-mono text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">
+                                                                        {stats.agentId.substring(0, 8)}...
+                                                                    </span>
+                                                                    </>
+                                                                ) : (
+                                                                    <span
+                                                                        className="font-mono text-xs sm:text-sm text-slate-700 dark:text-slate-300">
                                                                     {stats.agentId.substring(0, 8)}...
                                                                 </span>
-                                                            </>
-                                                        ) : (
-                                                            <span className="font-mono text-sm text-slate-700 dark:text-slate-300">
-                                                                {stats.agentId.substring(0, 8)}...
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <StatusBadge status={stats.lastCheckStatus}/>
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <div className="flex items-center gap-2">
-                                                    <Clock className="h-4 w-4 text-slate-400 dark:text-slate-500"/>
-                                                    <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                                                        {formatTime(stats.currentResponse)}
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <div className="w-32">
-                                                    <UptimeBar uptime={stats.uptime24h}/>
-                                                </div>
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <div className="w-32">
-                                                    <UptimeBar uptime={stats.uptime30d}/>
-                                                </div>
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <div className="text-sm text-slate-700 dark:text-slate-300">
-                                                    {stats.successChecks24h} / {stats.totalChecks24h}
-                                                </div>
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <div className="text-sm text-slate-700 dark:text-slate-300">
-                                                    {formatDateTime(stats.lastCheckTime)}
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                                </tbody>
-                            </table>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4">
+                                                        <StatusBadge status={stats.lastCheckStatus}/>
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4">
+                                                        <div className="flex items-center gap-1 sm:gap-2">
+                                                            <Clock
+                                                                className="h-3 w-3 sm:h-4 sm:w-4 text-slate-400 dark:text-slate-500 flex-shrink-0"/>
+                                                            <span
+                                                                className="text-xs sm:text-sm font-medium text-slate-900 dark:text-slate-100">
+                                                            {formatTime(stats.currentResponse)}
+                                                        </span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4">
+                                                        <div className="w-24 sm:w-32">
+                                                            <UptimeBar uptime={stats.uptime24h}/>
+                                                        </div>
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 hidden lg:table-cell">
+                                                        <div className="w-24 sm:w-32">
+                                                            <UptimeBar uptime={stats.uptime30d}/>
+                                                        </div>
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 hidden md:table-cell">
+                                                        <div
+                                                            className="text-xs sm:text-sm text-slate-700 dark:text-slate-300">
+                                                            {stats.successChecks24h} / {stats.totalChecks24h}
+                                                        </div>
+                                                    </td>
+                                                    <td className="whitespace-nowrap px-4 sm:px-6 py-3 sm:py-4 hidden xl:table-cell">
+                                                        <div
+                                                            className="text-xs sm:text-sm text-slate-700 dark:text-slate-300">
+                                                            {formatDateTime(stats.lastCheckTime)}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
                         </div>
                     </Card>
                 </main>

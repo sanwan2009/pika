@@ -13,7 +13,7 @@ import {getErrorMessage} from '../../lib/utils';
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 
 const MonitorList = () => {
-    const {message} = App.useApp();
+    const {message, modal} = App.useApp();
     const actionRef = useRef<ActionType>(null);
     const [form] = Form.useForm();
 
@@ -122,10 +122,9 @@ const MonitorList = () => {
     };
 
     const handleDelete = async (monitor: MonitorTask) => {
-        Modal.confirm({
+        modal.confirm({
             title: '删除监控项',
             content: `确定要删除监控「${monitor.name}」吗？`,
-            centered: true,
             okButtonProps: {danger: true},
             onOk: async () => {
                 try {
