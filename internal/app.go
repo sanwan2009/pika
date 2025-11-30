@@ -186,6 +186,7 @@ func setupApi(app *orz.App, components *AppComponents) {
 		publicApiWithOptionalAuth.GET("/agents/:id", components.AgentHandler.Get)
 		publicApiWithOptionalAuth.GET("/agents/:id/metrics", components.AgentHandler.GetMetrics)
 		publicApiWithOptionalAuth.GET("/agents/:id/metrics/latest", components.AgentHandler.GetLatestMetrics)
+		publicApiWithOptionalAuth.GET("/agents/:id/network-interfaces", components.AgentHandler.GetAvailableNetworkInterfaces)
 
 		// 监控统计数据（公开访问，支持可选认证）- 用于公共展示页面
 		publicApiWithOptionalAuth.GET("/monitors", components.MonitorHandler.GetMonitors)

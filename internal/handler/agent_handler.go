@@ -406,6 +406,7 @@ func (h *AgentHandler) GetMetrics(c echo.Context) error {
 
 	metricType := c.QueryParam("type")
 	rangeParam := c.QueryParam("range")
+	interfaceName := c.QueryParam("interface") // 网卡过滤参数（仅对 network 类型有效）
 
 	// 验证指标类型
 	validTypes := map[string]bool{
@@ -425,22 +426,20 @@ func (h *AgentHandler) GetMetrics(c echo.Context) error {
 		return orz.NewError(400, err.Error())
 	}
 
-	// 服务端自动计算最优聚合间隔
-	interval := service.CalculateInterval(start, end)
-
-	metrics, err := h.agentService.GetMetrics(ctx, agentID, metricType, start, end, interval)
+	// GetMetrics 内部会自动计算最优聚合间隔
+	metrics, err := h.agentService.GetMetrics(ctx, agentID, metricType, start, end, 0, interfaceName)
 	if err != nil {
 		return err
 	}
 
 	return orz.Ok(c, orz.Map{
-		"agentId":  agentID,
-		"type":     metricType,
-		"range":    rangeParam,
-		"start":    start,
-		"end":      end,
-		"interval": interval,
-		"metrics":  metrics,
+		"agentId":   agentID,
+		"type":      metricType,
+		"range":     rangeParam,
+		"start":     start,
+		"end":       end,
+		"interface": interfaceName,
+		"metrics":   metrics,
 	})
 }
 
@@ -460,6 +459,26 @@ func (h *AgentHandler) GetLatestMetrics(c echo.Context) error {
 	}
 
 	return orz.Ok(c, metrics)
+}
+
+// GetAvailableNetworkInterfaces 获取探针的可用网卡列表（公开接口，已登录返回全部，未登录返回公开可见）
+func (h *AgentHandler) GetAvailableNetworkInterfaces(c echo.Context) error {
+	id := c.Param("id")
+	ctx := c.Request().Context()
+
+	// 验证探针访问权限
+	if _, err := h.agentService.GetAgentByAuth(ctx, id, utils.IsAuthenticated(c)); err != nil {
+		return err
+	}
+
+	interfaces, err := h.agentService.GetAvailableNetworkInterfaces(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	return orz.Ok(c, orz.Map{
+		"interfaces": interfaces,
+	})
 }
 
 // GetAgents 获取探针列表（公开接口，已登录返回全部，未登录返回公开可见）

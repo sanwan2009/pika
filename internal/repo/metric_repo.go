@@ -335,10 +335,15 @@ type AggregatedNetworkMetricByInterface struct {
 	MaxRecvRate float64 `json:"maxRecvRate"`
 }
 
-// GetNetworkMetrics 获取聚合后的网络指标（按网卡接口分组）
-func (r *MetricRepo) GetNetworkMetrics(ctx context.Context, agentID string, start, end int64, interval int) ([]AggregatedNetworkMetric, error) {
+// GetNetworkMetrics 获取聚合后的网络指标（可选按网卡接口过滤）
+// 不指定网卡时查询 interface=” 的预聚合数据，指定网卡时只返回该网卡的数据
+func (r *MetricRepo) GetNetworkMetrics(ctx context.Context, agentID string, start, end int64, interval int, interfaceName string) ([]AggregatedNetworkMetric, error) {
 	var metrics []AggregatedNetworkMetric
 
+	intervalMs := int64(interval * 1000)
+
+	// 不管是否指定网卡，查询逻辑都一样：直接查询对应 interface 的数据
+	// interfaceName 为空字符串时，会查询到预先保存的总和数据
 	query := `
 		SELECT
 			CAST(FLOOR(timestamp / ?) * ? AS BIGINT) as timestamp,
@@ -346,14 +351,13 @@ func (r *MetricRepo) GetNetworkMetrics(ctx context.Context, agentID string, star
 			MAX(bytes_sent_rate) as max_sent_rate,
 			MAX(bytes_recv_rate) as max_recv_rate
 		FROM network_metrics
-		WHERE agent_id = ? AND timestamp >= ? AND timestamp <= ?
+		WHERE agent_id = ? AND timestamp >= ? AND timestamp <= ? AND interface = ?
 		GROUP BY 1, interface
-		ORDER BY timestamp ASC, interface ASC
+		ORDER BY timestamp ASC
 	`
 
-	intervalMs := int64(interval * 1000)
 	err := r.db.WithContext(ctx).
-		Raw(query, intervalMs, intervalMs, agentID, start, end).
+		Raw(query, intervalMs, intervalMs, agentID, start, end, interfaceName).
 		Scan(&metrics).Error
 
 	return metrics, err
@@ -557,25 +561,17 @@ type AggregatedDiskIOMetric struct {
 	MaxIopsInProgress uint64  `json:"maxIopsInProgress"` // 最大进行中的IO操作数
 }
 
-// GetDiskIOMetrics 获取聚合后的磁盘IO指标（汇总所有磁盘）
+// GetDiskIOMetrics 获取聚合后的磁盘IO指标（已在存储时合并所有磁盘）
 func (r *MetricRepo) GetDiskIOMetrics(ctx context.Context, agentID string, start, end int64, interval int) ([]AggregatedDiskIOMetric, error) {
 	var metrics []AggregatedDiskIOMetric
 
 	query := `
 		SELECT
 			CAST(FLOOR(timestamp / ?) * ? AS BIGINT) as timestamp,
-			SUM(read_bytes_rate) as max_read_rate,
-			SUM(write_bytes_rate) as max_write_rate,
-			SUM(CASE
-				WHEN read_bytes >= LAG(read_bytes) OVER (PARTITION BY device ORDER BY timestamp)
-				THEN read_bytes - LAG(read_bytes) OVER (PARTITION BY device ORDER BY timestamp)
-				ELSE 0
-			END) as total_read_bytes,
-			SUM(CASE
-				WHEN write_bytes >= LAG(write_bytes) OVER (PARTITION BY device ORDER BY timestamp)
-				THEN write_bytes - LAG(write_bytes) OVER (PARTITION BY device ORDER BY timestamp)
-				ELSE 0
-			END) as total_write_bytes,
+			MAX(read_bytes_rate) as max_read_rate,
+			MAX(write_bytes_rate) as max_write_rate,
+			MAX(read_bytes) as total_read_bytes,
+			MAX(write_bytes) as total_write_bytes,
 			MAX(iops_in_progress) as max_iops_in_progress
 		FROM disk_io_metrics
 		WHERE agent_id = ? AND timestamp >= ? AND timestamp <= ?
@@ -858,7 +854,7 @@ func (r *MetricRepo) AggregateNetworkConnectionToAgg(ctx context.Context, bucket
 	`, bucketSeconds, bucketMs, bucketMs, start, end).Error
 }
 
-// AggregateDiskIOToAgg 将原始磁盘IO数据聚合到聚合表（汇总所有磁盘）
+// AggregateDiskIOToAgg 将原始磁盘IO数据聚合到聚合表（已在存储时合并所有磁盘）
 func (r *MetricRepo) AggregateDiskIOToAgg(ctx context.Context, bucketSeconds int, start, end int64) error {
 	bucketMs := int64(bucketSeconds * 1000)
 	return r.db.WithContext(ctx).Exec(`
@@ -870,8 +866,8 @@ func (r *MetricRepo) AggregateDiskIOToAgg(ctx context.Context, bucketSeconds int
 			agent_id,
 			? as bucket_seconds,
 			(timestamp / ?) * ? as bucket_start,
-			SUM(read_bytes_rate) as max_read_bytes_rate,
-			SUM(write_bytes_rate) as max_write_bytes_rate,
+			MAX(read_bytes_rate) as max_read_bytes_rate,
+			MAX(write_bytes_rate) as max_write_bytes_rate,
 			MAX(iops_in_progress) as max_iops_in_progress
 		FROM disk_io_metrics
 		WHERE timestamp >= ? AND timestamp < ?
@@ -974,16 +970,33 @@ func (r *MetricRepo) GetDiskMetricsAgg(ctx context.Context, agentID string, star
 	return metrics, err
 }
 
-// GetNetworkMetricsAgg 从聚合表获取网络指标
-func (r *MetricRepo) GetNetworkMetricsAgg(ctx context.Context, agentID string, start, end int64, bucketSeconds int) ([]AggregatedNetworkMetric, error) {
+// GetNetworkMetricsAgg 从聚合表获取网络指标（可选按网卡接口过滤）
+// 不指定网卡时查询 interface=” 的预聚合数据，指定网卡时只返回该网卡的数据
+func (r *MetricRepo) GetNetworkMetricsAgg(ctx context.Context, agentID string, start, end int64, bucketSeconds int, interfaceName string) ([]AggregatedNetworkMetric, error) {
 	var metrics []AggregatedNetworkMetric
+
+	// 不管是否指定网卡，查询逻辑都一样：直接查询对应 interface 的数据
+	// interfaceName 为空字符串时，会查询到预先保存的总和数据
 	err := r.db.WithContext(ctx).
 		Table("network_metrics_aggs").
 		Select("bucket_start as timestamp, interface, max_sent_rate, max_recv_rate").
-		Where("agent_id = ? AND bucket_seconds = ? AND bucket_start >= ? AND bucket_start < ?", agentID, bucketSeconds, start, end).
-		Order("bucket_start, interface").
+		Where("agent_id = ? AND bucket_seconds = ? AND bucket_start >= ? AND bucket_start < ? AND interface = ?",
+			agentID, bucketSeconds, start, end, interfaceName).
+		Order("bucket_start").
 		Scan(&metrics).Error
 	return metrics, err
+}
+
+// GetAvailableNetworkInterfaces 获取探针的可用网卡列表（不包括空白的总和记录）
+func (r *MetricRepo) GetAvailableNetworkInterfaces(ctx context.Context, agentID string) ([]string, error) {
+	var interfaces []string
+	err := r.db.WithContext(ctx).
+		Table("network_metrics").
+		Select("DISTINCT interface").
+		Where("agent_id = ? AND interface != ?", agentID, ""). // 排除空字符串（总和记录）
+		Order("interface").
+		Pluck("interface", &interfaces).Error
+	return interfaces, err
 }
 
 // GetNetworkConnectionMetricsAgg 从聚合表获取网络连接指标

@@ -10,6 +10,7 @@ export interface GetAgentMetricsRequest {
     agentId: string;
     type: 'cpu' | 'memory' | 'disk' | 'network' | 'network_connection' | 'disk_io' | 'gpu' | 'temperature';
     range?: '1m' | '5m' | '15m' | '30m' | '1h' | '3h' | '6h' | '12h' | '1d' | '24h' | '3d' | '7d' | '30d';
+    interface?: string; // 网卡过滤参数（仅对 network 类型有效）
 }
 
 export interface GetAgentMetricsResponse {
@@ -18,7 +19,7 @@ export interface GetAgentMetricsResponse {
     range: string;
     start: number;
     end: number;
-    interval: number;
+    interface?: string;
     metrics: any[];
 }
 
@@ -61,15 +62,27 @@ export const getAgentForAdmin = (id: string) => {
 };
 
 export const getAgentMetrics = (params: GetAgentMetricsRequest) => {
-    const {agentId, type, range = '1h'} = params;
+    const {agentId, type, range = '1h', interface: interfaceName} = params;
     const query = new URLSearchParams();
     query.append('type', type);
     query.append('range', range);
+    if (interfaceName) {
+        query.append('interface', interfaceName);
+    }
     return get<GetAgentMetricsResponse>(`/agents/${agentId}/metrics?${query.toString()}`);
 };
 
 export const getAgentLatestMetrics = (agentId: string) => {
     return get<LatestMetrics>(`/agents/${agentId}/metrics/latest`);
+};
+
+// 获取探针的可用网卡列表
+export interface GetNetworkInterfacesResponse {
+    interfaces: string[];
+}
+
+export const getAvailableNetworkInterfaces = (agentId: string) => {
+    return get<GetNetworkInterfacesResponse>(`/agents/${agentId}/network-interfaces`);
 };
 
 export interface GetNetworkMetricsByInterfaceRequest {
