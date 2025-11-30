@@ -1,5 +1,5 @@
 import {del, get, post, put} from './request';
-import type {Agent, LatestMetrics} from '../types';
+import type {Agent, LatestMetrics} from '@/types';
 
 export interface ListAgentsResponse {
     items: Agent[];
@@ -441,19 +441,6 @@ export interface AgentStatistics {
     offline: number;
     onlineRate: number;
 }
-
-export const getAgentStatistics = () => {
-    return get<AgentStatistics>('/admin/agents/statistics');
-};
-
-// 获取服务端版本信息
-export interface VersionInfo {
-    version: string;
-}
-
-export const getServerVersion = () => {
-    return get<VersionInfo>('/agent/version');
-};
 
 // 删除探针
 export const deleteAgent = (agentId: string) => {

@@ -14,6 +14,7 @@ import (
 	"github.com/dushixiang/pika/internal/models"
 	"github.com/dushixiang/pika/internal/scheduler"
 	"github.com/dushixiang/pika/pkg/replace"
+	"github.com/dushixiang/pika/pkg/version"
 	"github.com/dushixiang/pika/web"
 	"github.com/google/uuid"
 	"github.com/spf13/afero/mem"
@@ -203,6 +204,11 @@ func setupApi(app *orz.App, components *AppComponents) {
 	adminApi := e.Group("/api/admin")
 	adminApi.Use(JWTAuthMiddleware(components.AccountHandler))
 	{
+		adminApi.GET("/version", func(c echo.Context) error {
+			return c.JSON(http.StatusOK, orz.Map{
+				"version": version.GetVersion(),
+			})
+		})
 		// 账户相关
 		adminApi.GET("/account/info", components.AccountHandler.GetCurrentUser)
 		adminApi.POST("/logout", components.AccountHandler.Logout)
