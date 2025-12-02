@@ -22,13 +22,17 @@ func NewAgentRepo(db *gorm.DB) *AgentRepo {
 
 // UpdateStatus 更新探针状态
 func (r *AgentRepo) UpdateStatus(ctx context.Context, agentID string, status int, lastSeenAt int64) error {
+	m := map[string]interface{}{
+		"status": status,
+	}
+	if lastSeenAt > 0 {
+		m["last_seen_at"] = lastSeenAt
+	}
+
 	return r.db.WithContext(ctx).
 		Model(&models.Agent{}).
 		Where("id = ?", agentID).
-		Updates(map[string]interface{}{
-			"status":       status,
-			"last_seen_at": lastSeenAt,
-		}).Error
+		Updates(m).Error
 }
 
 // FindOnlineAgents 查找所有在线探针
