@@ -286,39 +286,51 @@ func (n *Notifier) sendCustomWebhook(ctx context.Context, config map[string]inte
 
 		// 使用 fasttemplate 进行变量替换
 		t := fasttemplate.New(customBody, "{{", "}}")
+		escape := func(s string) string {
+			b, _ := json.Marshal(s)
+			// json.Marshal 会返回带双引号的字符串，例如 "hello\nworld"
+			// 模板中不需要外层双引号，所以去掉
+			return string(b[1 : len(b)-1])
+		}
+
 		bodyStr := t.ExecuteFuncString(func(w io.Writer, tag string) (int, error) {
+			var v string
+
 			switch tag {
 			case "message":
-				return w.Write([]byte(message))
+				v = message
 			case "agent.id":
-				return w.Write([]byte(agent.ID))
+				v = agent.ID
 			case "agent.name":
-				return w.Write([]byte(agent.Name))
+				v = agent.Name
 			case "agent.hostname":
-				return w.Write([]byte(agent.Hostname))
+				v = agent.Hostname
 			case "agent.ip":
-				return w.Write([]byte(agent.IP))
+				v = agent.IP
 			case "alert.type":
-				return w.Write([]byte(record.AlertType))
+				v = record.AlertType
 			case "alert.level":
-				return w.Write([]byte(record.Level))
+				v = record.Level
 			case "alert.status":
-				return w.Write([]byte(record.Status))
+				v = record.Status
 			case "alert.message":
-				return w.Write([]byte(record.Message))
+				v = record.Message
 			case "alert.threshold":
-				return w.Write([]byte(fmt.Sprintf("%.2f", record.Threshold)))
+				v = fmt.Sprintf("%.2f", record.Threshold)
 			case "alert.actualValue":
-				return w.Write([]byte(fmt.Sprintf("%.2f", record.ActualValue)))
+				v = fmt.Sprintf("%.2f", record.ActualValue)
 			case "alert.firedAt":
-				return w.Write([]byte(fmt.Sprintf("%d", record.FiredAt)))
+				v = fmt.Sprintf("%d", record.FiredAt)
 			case "alert.resolvedAt":
-				return w.Write([]byte(fmt.Sprintf("%d", record.ResolvedAt)))
+				v = fmt.Sprintf("%d", record.ResolvedAt)
 			default:
-				// 未知变量保持原样
 				return w.Write([]byte("{{" + tag + "}}"))
 			}
+
+			// 写入 JSON 安全转义后的值
+			return w.Write([]byte(escape(v)))
 		})
+		n.logger.Sugar().Debugf("自定义Webhook请求体: %s", bodyStr)
 		reqBody = strings.NewReader(bodyStr)
 		contentType = "text/plain"
 
