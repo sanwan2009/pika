@@ -44,7 +44,7 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
             risks.push({
                 level: 'critical',
                 title: '发现可疑进程',
-                description: `发现 ${result.assetInventory.processAssets.suspiciousProcesses.length} 个可执行文件已删除的进程`
+                description: `发现 ${result.assetInventory.processAssets.suspiciousProcesses.length} 个可执行文件已删除的进程。可能是系统更新后进程未重启，也可能是恶意软件。建议检查 /proc/{pid}/exe 指向的文件路径，确认是否为正常更新导致的文件删除。`
             });
         }
 
@@ -500,7 +500,16 @@ const AuditResultView = ({result}: AuditResultViewProps) => {
                                     {result.assetInventory.processAssets?.suspiciousProcesses && result.assetInventory.processAssets.suspiciousProcesses.length > 0 && (
                                         <Alert
                                             message="发现可疑进程"
-                                            description="以下进程的可执行文件已被删除，这通常是恶意软件的迹象（或者是进程更新中）。"
+                                            description={
+                                                <div>
+                                                    <div className="mb-2">以下进程的可执行文件已被删除。可能的原因包括：</div>
+                                                    <ul className="list-disc pl-5 mb-2">
+                                                        <li>系统更新后进程未重启（正常情况）</li>
+                                                        <li>恶意软件隐藏自身可执行文件</li>
+                                                    </ul>
+                                                    <div>建议检查 <code>/proc/&#123;pid&#125;/exe</code> 指向的文件路径，确认是否为正常更新导致的文件删除。</div>
+                                                </div>
+                                            }
                                             type="error"
                                             showIcon
                                         />
