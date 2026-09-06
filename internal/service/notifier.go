@@ -10,25 +10,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/utils"
 	"github.com/go-orz/cache"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/utils"
 	"github.com/valyala/fasttemplate"
 	"go.uber.org/zap"
+	"golang.org/x/net/proxy"
 	"gopkg.in/gomail.v2"
 )
+
+const (
+	maxRetries     = 3
+	retryBaseDelay = 1 * time.Second
+)
+
+var sharedHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 // AlertTypeMetadata 告警类型元数据
 type AlertTypeMetadata struct {
 	Name          string // 中文名称
 	ThresholdUnit string // 阈值单位
 	ValueUnit     string // 当前值单位
+	ShowThreshold bool   // 是否显示阈值
+	ShowActual    bool   // 是否显示当前值
 }
 
 // 告警类型元数据映射
@@ -37,36 +57,78 @@ var alertTypeMetadataMap = map[string]AlertTypeMetadata{
 		Name:          "CPU告警",
 		ThresholdUnit: "%",
 		ValueUnit:     "%",
+		ShowThreshold: true,
+		ShowActual:    true,
 	},
 	"memory": {
 		Name:          "内存告警",
 		ThresholdUnit: "%",
 		ValueUnit:     "%",
+		ShowThreshold: true,
+		ShowActual:    true,
 	},
 	"disk": {
 		Name:          "磁盘告警",
 		ThresholdUnit: "%",
 		ValueUnit:     "%",
+		ShowThreshold: true,
+		ShowActual:    true,
 	},
 	"network": {
 		Name:          "网络告警",
 		ThresholdUnit: "MB/s",
 		ValueUnit:     "MB/s",
+		ShowThreshold: true,
+		ShowActual:    true,
+	},
+	"traffic": {
+		Name:          "流量告警",
+		ThresholdUnit: "%",
+		ValueUnit:     "%",
+		ShowThreshold: true,
+		ShowActual:    true,
 	},
 	"cert": {
 		Name:          "证书告警",
 		ThresholdUnit: "天",
 		ValueUnit:     "天",
+		ShowThreshold: true,
+		ShowActual:    true,
 	},
 	"service": {
 		Name:          "服务告警",
 		ThresholdUnit: "秒",
-		ValueUnit:     "秒",
+		ValueUnit:     "秒离线",
+		ShowThreshold: false,
+		ShowActual:    true,
 	},
 	"agent_offline": {
 		Name:          "探针离线告警",
 		ThresholdUnit: "秒",
 		ValueUnit:     "秒",
+		ShowThreshold: true,
+		ShowActual:    true,
+	},
+	"agent_expire": {
+		Name:          "机器过期提醒",
+		ThresholdUnit: "天",
+		ValueUnit:     "天",
+		ShowThreshold: true,
+		ShowActual:    true,
+	},
+	"ssh_login": {
+		Name:          "SSH登录成功",
+		ThresholdUnit: "",
+		ValueUnit:     "",
+		ShowThreshold: false,
+		ShowActual:    false,
+	},
+	"tamper": {
+		Name:          "防篡改事件",
+		ThresholdUnit: "",
+		ValueUnit:     "",
+		ShowThreshold: false,
+		ShowActual:    false,
 	},
 }
 
@@ -102,6 +164,48 @@ func maskIPAddress(ip string) string {
 	return "****"
 }
 
+func joinAgentIPs(ip string, ipv4 string, ipv6 string) string {
+	parts := make([]string, 0, 3)
+	seen := make(map[string]bool)
+
+	// 按优先级添加，避免重复
+	if ip != "" && !seen[ip] {
+		parts = append(parts, ip)
+		seen[ip] = true
+	}
+	if ipv4 != "" && !seen[ipv4] {
+		parts = append(parts, ipv4)
+		seen[ipv4] = true
+	}
+	if ipv6 != "" && !seen[ipv6] {
+		parts = append(parts, ipv6)
+		seen[ipv6] = true
+	}
+	return strings.Join(parts, " / ")
+}
+
+func formatAgentIP(agent *models.Agent, mask bool) string {
+	ip := strings.TrimSpace(agent.IP)
+	ipv4 := strings.TrimSpace(agent.IPv4)
+	ipv6 := strings.TrimSpace(agent.IPv6)
+	if mask {
+		if ip != "" {
+			ip = maskIPAddress(ip)
+		}
+		if ipv4 != "" {
+			ipv4 = maskIPAddress(ipv4)
+		}
+		if ipv6 != "" {
+			ipv6 = maskIPAddress(ipv6)
+		}
+	}
+	combined := joinAgentIPs(ip, ipv4, ipv6)
+	if combined == "" {
+		return "-"
+	}
+	return combined
+}
+
 // getAlertTypeMetadata 获取告警类型元数据，如果不存在则返回默认值
 func getAlertTypeMetadata(alertType string) AlertTypeMetadata {
 	if metadata, ok := alertTypeMetadataMap[alertType]; ok {
@@ -112,6 +216,8 @@ func getAlertTypeMetadata(alertType string) AlertTypeMetadata {
 		Name:          "未知告警",
 		ThresholdUnit: "",
 		ValueUnit:     "",
+		ShowThreshold: true,
+		ShowActual:    true,
 	}
 }
 
@@ -132,10 +238,7 @@ func (n *Notifier) buildMessage(agent *models.Agent, record *models.AlertRecord,
 	metadata := getAlertTypeMetadata(record.AlertType)
 
 	// 处理 IP 地址显示
-	displayIP := agent.IP
-	if maskIP {
-		displayIP = maskIPAddress(agent.IP)
-	}
+	displayIP := formatAgentIP(agent, maskIP)
 
 	// 根据状态构建消息
 	switch record.Status {
@@ -143,6 +246,8 @@ func (n *Notifier) buildMessage(agent *models.Agent, record *models.AlertRecord,
 		return n.buildFiringMessage(agent, record, displayIP, levelIcon, metadata)
 	case "resolved":
 		return n.buildResolvedMessage(agent, record, displayIP, metadata)
+	case "notice":
+		return n.buildNoticeMessage(agent, record, displayIP, levelIcon, metadata)
 	default:
 		// 未知状态，返回基本信息
 		return fmt.Sprintf("⚠️ 未知告警状态: %s\n探针: %s (%s)", record.Status, agent.Name, agent.ID)
@@ -157,30 +262,32 @@ func (n *Notifier) buildFiringMessage(
 	levelIcon string,
 	metadata AlertTypeMetadata,
 ) string {
-	return fmt.Sprintf(
-		"%s %s\n\n"+
-			"探针: %s (%s)\n"+
-			"主机: %s\n"+
-			"IP: %s\n"+
-			"告警类型: %s\n"+
-			"告警消息: %s\n"+
-			"阈值: %.2f%s\n"+
-			"当前值: %.2f%s\n"+
-			"触发时间: %s",
-		levelIcon,
-		metadata.Name,
-		agent.Name,
-		agent.ID,
-		agent.Hostname,
-		displayIP,
-		record.AlertType,
-		record.Message,
-		record.Threshold,
-		metadata.ThresholdUnit,
-		record.ActualValue,
-		metadata.ValueUnit,
-		utils.FormatTimestamp(record.FiredAt),
-	)
+	title := fmt.Sprintf("%s %s", levelIcon, metadata.Name)
+	if record.Level != "" && record.Level != "info" {
+		title = fmt.Sprintf("%s %s【%s】", levelIcon, metadata.Name, strings.ToUpper(record.Level))
+	}
+
+	lines := []string{
+		title,
+		"",
+		fmt.Sprintf("📍 探针: %s", agent.Name),
+		fmt.Sprintf("🖥️  主机: %s", agent.Hostname),
+		fmt.Sprintf("🌐 IP: %s", displayIP),
+		"",
+		"⚠️ " + record.Message,
+	}
+
+	if metadata.ShowThreshold {
+		lines = append(lines, fmt.Sprintf("📊 阈值: %.2f%s", record.Threshold, metadata.ThresholdUnit))
+	}
+
+	if metadata.ShowActual {
+		lines = append(lines, fmt.Sprintf("📈 当前值: %.2f%s", record.ActualValue, metadata.ValueUnit))
+	}
+
+	lines = append(lines, "", fmt.Sprintf("🕐 时间: %s", utils.FormatTimestamp(record.FiredAt)))
+
+	return strings.Join(lines, "\n")
 }
 
 // buildResolvedMessage 构建告警恢复消息
@@ -190,33 +297,78 @@ func (n *Notifier) buildResolvedMessage(
 	displayIP string,
 	metadata AlertTypeMetadata,
 ) string {
-	// 计算持续时间
 	var durationStr string
 	if record.FiredAt > 0 && record.ResolvedAt > record.FiredAt {
 		durationMs := record.ResolvedAt - record.FiredAt
 		durationStr = utils.FormatDuration(durationMs)
 	}
 
-	return fmt.Sprintf(
-		"✅ %s已恢复\n\n"+
-			"探针: %s (%s)\n"+
-			"主机: %s\n"+
-			"IP: %s\n"+
-			"告警类型: %s\n"+
-			"当前值: %.2f%s\n"+
-			"持续时间: %s\n"+
-			"恢复时间: %s",
-		metadata.Name,
-		agent.Name,
-		agent.ID,
-		agent.Hostname,
-		displayIP,
-		record.AlertType,
-		record.ActualValue,
-		metadata.ValueUnit,
-		durationStr,
-		utils.FormatTimestamp(record.ResolvedAt),
-	)
+	lines := []string{
+		fmt.Sprintf("✅ %s已恢复", metadata.Name),
+		"",
+		fmt.Sprintf("📍 探针: %s", agent.Name),
+		fmt.Sprintf("🖥️  主机: %s", agent.Hostname),
+		fmt.Sprintf("🌐 IP: %s", displayIP),
+		"",
+		"✓ " + record.Message,
+	}
+
+	if metadata.ShowActual {
+		if (record.AlertType == "service" || record.AlertType == "agent_offline") && record.ResolvedValue == 0 {
+			lines = append(lines,
+				fmt.Sprintf("⏱️  离线时长: %.0f秒", record.ActualValue),
+				"✅ 恢复状态: 已在线",
+			)
+		} else {
+			lines = append(lines,
+				fmt.Sprintf("📈 告警值: %.2f%s", record.ActualValue, metadata.ValueUnit),
+				fmt.Sprintf("📉 恢复值: %.2f%s", record.ResolvedValue, metadata.ValueUnit),
+			)
+		}
+	}
+
+	if durationStr != "" {
+		lines = append(lines, fmt.Sprintf("⏱️  持续时间: %s", durationStr))
+	}
+
+	lines = append(lines, fmt.Sprintf("🕐 恢复时间: %s", utils.FormatTimestamp(record.ResolvedAt)))
+
+	return strings.Join(lines, "\n")
+}
+
+func (n *Notifier) buildNoticeMessage(
+	agent *models.Agent,
+	record *models.AlertRecord,
+	displayIP string,
+	levelIcon string,
+	metadata AlertTypeMetadata,
+) string {
+	title := fmt.Sprintf("%s %s", levelIcon, metadata.Name)
+	if record.Level != "" && record.Level != "info" {
+		title = fmt.Sprintf("%s %s【%s】", levelIcon, metadata.Name, strings.ToUpper(record.Level))
+	}
+
+	lines := []string{
+		title,
+		"",
+		fmt.Sprintf("📍 探针: %s", agent.Name),
+		fmt.Sprintf("🖥️  主机: %s", agent.Hostname),
+		fmt.Sprintf("🌐 IP: %s", displayIP),
+		"",
+		"ℹ️ " + record.Message,
+	}
+
+	if metadata.ShowThreshold {
+		lines = append(lines, fmt.Sprintf("📊 阈值: %.2f%s", record.Threshold, metadata.ThresholdUnit))
+	}
+
+	if metadata.ShowActual {
+		lines = append(lines, fmt.Sprintf("📈 当前值: %.2f%s", record.ActualValue, metadata.ValueUnit))
+	}
+
+	lines = append(lines, "", fmt.Sprintf("🕐 时间: %s", utils.FormatTimestamp(record.FiredAt)))
+
+	return strings.Join(lines, "\n")
 }
 
 // sendDingTalk 发送钉钉通知
@@ -291,7 +443,7 @@ func (n *Notifier) getWecomAppToken(ctx context.Context, origin, corpId, corpSec
 	accessTokenURL := fmt.Sprintf("%s/cgi-bin/gettoken?corpid=%s&corpsecret=%s", origin, corpId, corpSecret)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, accessTokenURL, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -301,7 +453,7 @@ func (n *Notifier) getWecomAppToken(ctx context.Context, origin, corpId, corpSec
 		AccessToken string `json:"access_token"`
 		ErrCode     int    `json:"errcode"`
 		ErrMsg      string `json:"errmsg"`
-		ExpiresIn   int64  `json:"expires_in"` //Second
+		ExpiresIn   int64  `json:"expires_in"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
@@ -312,12 +464,10 @@ func (n *Notifier) getWecomAppToken(ctx context.Context, origin, corpId, corpSec
 		return "", errors.New(tokenResp.ErrMsg)
 	}
 
-	// 提前两分钟过期
 	token := tokenResp.AccessToken
 	expires := time.Duration(tokenResp.ExpiresIn)*time.Second - 2*time.Minute
 	wecomAppAccessTokenCache.Set(key, token, expires)
 	return token, nil
-
 }
 
 // sendWeComApp 发送企业应用微信通知
@@ -393,20 +543,87 @@ func (n *Notifier) sendFeishu(ctx context.Context, webhook, signSecret, message 
 	return nil
 }
 
-// sendTelegram 发送 Telegram 通知
-func (n *Notifier) sendTelegram(ctx context.Context, botToken, chatID, message string) error {
-	// 构造 Telegram Bot API URL
-	webhookURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+func buildTelegramWebhookURL(botToken, apiBaseURL string) (string, error) {
+	if apiBaseURL == "" {
+		apiBaseURL = "https://api.telegram.org"
+	}
 
-	// 构造消息体
+	parsedURL, err := url.Parse(apiBaseURL)
+	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return "", fmt.Errorf("Telegram 自定义反代地址必须是有效的 HTTP/HTTPS 地址")
+	}
+	if parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return "", fmt.Errorf("Telegram 自定义反代地址不能包含查询参数或片段")
+	}
+
+	parsedURL.Path = strings.TrimRight(parsedURL.Path, "/") + "/bot" + botToken + "/sendMessage"
+	return parsedURL.String(), nil
+}
+
+func newTelegramHTTPClient(proxyURL string) (*http.Client, error) {
+	if proxyURL == "" {
+		return sharedHTTPClient, nil
+	}
+
+	parsedURL, err := url.Parse(proxyURL)
+	if err != nil || parsedURL.Host == "" {
+		return nil, fmt.Errorf("Telegram 代理地址无效")
+	}
+
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	switch parsedURL.Scheme {
+	case "http":
+		transport.Proxy = http.ProxyURL(parsedURL)
+	case "socks5":
+		dialer, err := proxy.FromURL(parsedURL, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("创建 Telegram SOCKS5 代理失败: %w", err)
+		}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+				return contextDialer.DialContext(ctx, network, address)
+			}
+			return dialer.Dial(network, address)
+		}
+	default:
+		return nil, fmt.Errorf("Telegram 代理仅支持 http:// 或 socks5://")
+	}
+
+	return &http.Client{Timeout: 10 * time.Second, Transport: transport}, nil
+}
+
+// sendTelegram 发送 Telegram 通知
+func (n *Notifier) sendTelegram(ctx context.Context, botToken, chatID, message, proxyURL, apiBaseURL string) error {
+	if utf8.RuneCountInString(message) > 4096 {
+		n.logger.Warn("Telegram消息过长，进行截断",
+			zap.Int("originalLen", utf8.RuneCountInString(message)),
+			zap.Int("truncatedLen", 4096),
+		)
+		runes := []rune(message)
+		message = string(runes[:4093]) + "..."
+	}
+
+	webhookURL, err := buildTelegramWebhookURL(botToken, apiBaseURL)
+	if err != nil {
+		return err
+	}
+
+	httpClient, err := newTelegramHTTPClient(proxyURL)
+	if err != nil {
+		return err
+	}
+
 	body := map[string]interface{}{
 		"chat_id": chatID,
 		"text":    message,
-		// 可选：使用 Markdown 格式
-		// "parse_mode": "Markdown",
 	}
 
-	_, err := n.sendJSONRequest(ctx, webhookURL, body)
+	_, err = n.sendJSONRequestWithClient(ctx, httpClient, webhookURL, body)
 	if err != nil {
 		return err
 	}
@@ -415,37 +632,54 @@ func (n *Notifier) sendTelegram(ctx context.Context, botToken, chatID, message s
 
 // sendEmail 发送邮件通知
 func (n *Notifier) sendEmail(ctx context.Context, smtpHost string, smtpPort int, fromEmail, password, toEmail, subject, message string) error {
-	// 创建邮件消息
 	m := gomail.NewMessage()
 	m.SetHeader("From", fromEmail)
 	m.SetHeader("To", toEmail)
 	m.SetHeader("Subject", subject)
 	m.SetBody("text/plain", message)
 
-	// 创建 SMTP 拨号器
 	d := gomail.NewDialer(smtpHost, smtpPort, fromEmail, password)
 
-	// 发送邮件
-	if err := d.DialAndSend(m); err != nil {
-		return fmt.Errorf("发送邮件失败: %w", err)
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			delay := retryBaseDelay * time.Duration(i)
+			n.logger.Info("邮件发送重试",
+				zap.Int("attempt", i+1),
+				zap.Duration("delay", delay),
+			)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		if err := d.DialAndSend(m); err != nil {
+			lastErr = err
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			continue
+		}
+
+		n.logger.Info("邮件发送成功",
+			zap.String("from", fromEmail),
+			zap.String("to", toEmail),
+			zap.String("subject", subject),
+		)
+		return nil
 	}
 
-	n.logger.Info("邮件发送成功",
-		zap.String("from", fromEmail),
-		zap.String("to", toEmail),
-		zap.String("subject", subject),
-	)
-
-	return nil
+	return fmt.Errorf("邮件重试%d次后仍失败: %w", maxRetries, lastErr)
 }
 
 // webhookConfig Webhook 配置
 type webhookConfig struct {
-	URL          string
-	Method       string
-	Headers      map[string]string
-	BodyTemplate string
-	CustomBody   string
+	URL        string
+	Method     string
+	Headers    map[string]string
+	CustomBody string
 }
 
 // parseWebhookConfig 解析 Webhook 配置
@@ -472,80 +706,21 @@ func parseWebhookConfig(config map[string]interface{}) (*webhookConfig, error) {
 		}
 	}
 
-	// 获取请求体模板类型，默认 json
-	bodyTemplate := "json"
-	if bt, ok := config["bodyTemplate"].(string); ok && bt != "" {
-		bodyTemplate = bt
-	}
-
 	// 获取自定义请求体
 	customBody, _ := config["customBody"].(string)
 
 	return &webhookConfig{
-		URL:          webhookURL,
-		Method:       method,
-		Headers:      headers,
-		BodyTemplate: bodyTemplate,
-		CustomBody:   customBody,
+		URL:        webhookURL,
+		Method:     method,
+		Headers:    headers,
+		CustomBody: customBody,
 	}, nil
 }
 
-// buildJSONBody 构建 JSON 格式的请求体
-func (n *Notifier) buildJSONBody(agent *models.Agent, record *models.AlertRecord, message string) (io.Reader, error) {
-	body := map[string]interface{}{
-		"msg_type": "text",
-		"text": map[string]string{
-			"content": message,
-		},
-		"agent": map[string]interface{}{
-			"id":       agent.ID,
-			"name":     agent.Name,
-			"hostname": agent.Hostname,
-			"ip":       agent.IP,
-		},
-		"alert": map[string]interface{}{
-			"type":        record.AlertType,
-			"level":       record.Level,
-			"status":      record.Status,
-			"message":     record.Message,
-			"threshold":   record.Threshold,
-			"actualValue": record.ActualValue,
-			"firedAt":     record.FiredAt,
-			"resolvedAt":  record.ResolvedAt,
-		},
-	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("序列化 JSON 失败: %w", err)
-	}
-	return bytes.NewReader(data), nil
-}
-
-// buildFormBody 构建 Form 表单格式的请求体
-func (n *Notifier) buildFormBody(agent *models.Agent, record *models.AlertRecord, message string) io.Reader {
-	formData := url.Values{}
-	formData.Set("message", message)
-	formData.Set("agent_id", agent.ID)
-	formData.Set("agent_name", agent.Name)
-	formData.Set("agent_hostname", agent.Hostname)
-	formData.Set("agent_ip", agent.IP)
-	formData.Set("alert_type", record.AlertType)
-	formData.Set("alert_level", record.Level)
-	formData.Set("alert_status", record.Status)
-	formData.Set("alert_message", record.Message)
-	formData.Set("threshold", fmt.Sprintf("%.2f", record.Threshold))
-	formData.Set("actual_value", fmt.Sprintf("%.2f", record.ActualValue))
-	formData.Set("fired_at", fmt.Sprintf("%d", record.FiredAt))
-	if record.ResolvedAt > 0 {
-		formData.Set("resolved_at", fmt.Sprintf("%d", record.ResolvedAt))
-	}
-	return strings.NewReader(formData.Encode())
-}
-
 // buildCustomBody 构建自定义模板格式的请求体
-func (n *Notifier) buildCustomBody(agent *models.Agent, record *models.AlertRecord, message, customBody string) (io.Reader, error) {
+func (n *Notifier) buildCustomBody(agent *models.Agent, record *models.AlertRecord, message, customBody string, maskIP bool) (io.Reader, error) {
 	if customBody == "" {
-		return nil, fmt.Errorf("使用 custom 模板时必须提供 customBody")
+		return nil, fmt.Errorf("必须提供自定义请求体模板")
 	}
 
 	// 使用 fasttemplate 进行变量替换
@@ -571,6 +746,10 @@ func (n *Notifier) buildCustomBody(agent *models.Agent, record *models.AlertReco
 			v = agent.Hostname
 		case "agent.ip":
 			v = agent.IP
+		case "agent.ipv4":
+			v = agent.IPv4
+		case "agent.ipv6":
+			v = agent.IPv6
 		case "alert.type":
 			v = record.AlertType
 		case "alert.level":
@@ -583,6 +762,8 @@ func (n *Notifier) buildCustomBody(agent *models.Agent, record *models.AlertReco
 			v = fmt.Sprintf("%.2f", record.Threshold)
 		case "alert.actualValue":
 			v = fmt.Sprintf("%.2f", record.ActualValue)
+		case "alert.resolvedValue":
+			v = fmt.Sprintf("%.2f", record.ResolvedValue)
 		case "alert.firedAt":
 			// 格式化的触发时间 (使用系统时区，Docker 中设置为 Asia/Shanghai)
 			v = utils.FormatTimestamp(record.FiredAt)
@@ -601,34 +782,70 @@ func (n *Notifier) buildCustomBody(agent *models.Agent, record *models.AlertReco
 	return strings.NewReader(bodyStr), nil
 }
 
+// retryDoWithBackoff 带重试和退避的 HTTP 请求执行
+func (n *Notifier) retryDoWithBackoff(ctx context.Context, createReq func() (*http.Request, error)) (*http.Response, error) {
+	return n.retryDoWithClientBackoff(ctx, sharedHTTPClient, createReq)
+}
+
+func (n *Notifier) retryDoWithClientBackoff(ctx context.Context, httpClient *http.Client, createReq func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			delay := retryBaseDelay * time.Duration(i)
+			n.logger.Info("通知发送重试",
+				zap.Int("attempt", i+1),
+				zap.Duration("delay", delay),
+			)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := createReq()
+		if err != nil {
+			return nil, fmt.Errorf("创建请求失败: %w", err)
+		}
+
+		resp, err := httpClient.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("重试%d次后仍失败: %w", maxRetries, lastErr)
+}
+
 // sendHTTPRequest 发送 HTTP 请求
 func (n *Notifier) sendHTTPRequest(ctx context.Context, method, webhookURL string, body io.Reader, headers map[string]string, contentType string) error {
-	// 创建请求
-	req, err := http.NewRequestWithContext(ctx, method, webhookURL, body)
+	bodyData, err := io.ReadAll(body)
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
+		return fmt.Errorf("读取请求体失败: %w", err)
 	}
 
-	// 设置 Content-Type
-	req.Header.Set("Content-Type", contentType)
-
-	// 设置自定义请求头
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	createReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, method, webhookURL, bytes.NewReader(bodyData))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", contentType)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		return req, nil
 	}
 
-	// 发送请求
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := n.retryDoWithBackoff(ctx, createReq)
 	if err != nil {
 		return fmt.Errorf("发送请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 读取响应
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -655,62 +872,42 @@ func (n *Notifier) sendCustomWebhook(ctx context.Context, config map[string]inte
 	// 构建消息内容
 	message := n.buildMessage(agent, record, maskIP)
 
-	// 根据模板类型构建请求体
-	var reqBody io.Reader
-	var contentType string
-
-	switch cfg.BodyTemplate {
-	case "json":
-		reqBody, err = n.buildJSONBody(agent, record, message)
-		if err != nil {
-			return err
-		}
-		contentType = "application/json"
-
-	case "form":
-		reqBody = n.buildFormBody(agent, record, message)
-		contentType = "application/x-www-form-urlencoded"
-
-	case "custom":
-		reqBody, err = n.buildCustomBody(agent, record, message, cfg.CustomBody)
-		if err != nil {
-			return err
-		}
-		contentType = "text/plain"
-
-	default:
-		return fmt.Errorf("不支持的 bodyTemplate: %s", cfg.BodyTemplate)
+	// 构建自定义请求体
+	reqBody, err := n.buildCustomBody(agent, record, message, cfg.CustomBody, maskIP)
+	if err != nil {
+		return err
 	}
 
-	// 发送 HTTP 请求
+	// 发送 HTTP 请求，使用 application/json 作为默认 Content-Type
+	contentType := "application/json"
 	return n.sendHTTPRequest(ctx, cfg.Method, cfg.URL, reqBody, cfg.Headers, contentType)
 }
 
-// sendJSONRequest 发送JSON请求
 func (n *Notifier) sendJSONRequest(ctx context.Context, url string, body interface{}) ([]byte, error) {
+	return n.sendJSONRequestWithClient(ctx, sharedHTTPClient, url, body)
+}
+
+func (n *Notifier) sendJSONRequestWithClient(ctx context.Context, httpClient *http.Client, url string, body interface{}) ([]byte, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("序列化请求体失败: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
+	createReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := n.retryDoWithClientBackoff(ctx, httpClient, createReq)
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 读取响应
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -808,7 +1005,10 @@ func (n *Notifier) sendTelegramByConfig(ctx context.Context, config map[string]i
 		return fmt.Errorf("Telegram 配置缺少 chatID")
 	}
 
-	return n.sendTelegram(ctx, botToken, chatID, message)
+	proxyURL, _ := config["proxyURL"].(string)
+	apiBaseURL, _ := config["apiBaseURL"].(string)
+
+	return n.sendTelegram(ctx, botToken, chatID, message, proxyURL, apiBaseURL)
 }
 
 // sendEmailByConfig 根据配置发送邮件通知
@@ -897,23 +1097,64 @@ func (n *Notifier) SendNotificationByConfig(ctx context.Context, channelConfig *
 
 // SendNotificationByConfigs 根据新的配置结构向多个渠道发送通知
 func (n *Notifier) SendNotificationByConfigs(ctx context.Context, channelConfigs []models.NotificationChannelConfig, record *models.AlertRecord, agent *models.Agent, maskIP bool) error {
-	var errs []error
+	message := n.buildMessage(agent, record, maskIP)
 
-	for _, channelConfig := range channelConfigs {
-		if err := n.SendNotificationByConfig(ctx, &channelConfig, record, agent, maskIP); err != nil {
-			n.logger.Error("发送通知失败",
-				zap.String("channelType", channelConfig.Type),
-				zap.Error(err),
-			)
-			errs = append(errs, err)
+	var wg sync.WaitGroup
+	var errs []error
+	var mu sync.Mutex
+
+	for _, cfg := range channelConfigs {
+		if !cfg.Enabled {
+			continue
 		}
+		wg.Add(1)
+		go func(cfg models.NotificationChannelConfig) {
+			defer wg.Done()
+			err := n.sendToChannel(ctx, &cfg, message, agent, record, maskIP)
+			if err != nil {
+				n.logger.Error("发送通知失败",
+					zap.String("channelType", cfg.Type),
+					zap.Error(err),
+				)
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}(cfg)
 	}
+
+	wg.Wait()
 
 	if len(errs) > 0 {
 		return fmt.Errorf("部分通知发送失败: %v", errs)
 	}
-
 	return nil
+}
+
+func (n *Notifier) sendToChannel(ctx context.Context, channelConfig *models.NotificationChannelConfig, message string, agent *models.Agent, record *models.AlertRecord, maskIP bool) error {
+	n.logger.Info("发送通知", zap.String("channelType", channelConfig.Type))
+
+	channelCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	switch channelConfig.Type {
+	case "dingtalk":
+		return n.sendDingTalkByConfig(channelCtx, channelConfig.Config, message)
+	case "wecom":
+		return n.sendWeComByConfig(channelCtx, channelConfig.Config, message)
+	case "wecomApp":
+		return n.sendWeComAppByConfig(channelCtx, channelConfig.Config, message)
+	case "feishu":
+		return n.sendFeishuByConfig(channelCtx, channelConfig.Config, message)
+	case "telegram":
+		return n.sendTelegramByConfig(channelCtx, channelConfig.Config, message)
+	case "email":
+		return n.sendEmailByConfig(channelCtx, channelConfig.Config, message)
+	case "webhook":
+		return n.sendWebhookByConfig(channelCtx, channelConfig.Config, agent, record, maskIP)
+	default:
+		return fmt.Errorf("不支持的通知渠道类型: %s", channelConfig.Type)
+	}
 }
 
 // SendDingTalkByConfig 导出方法供外部调用
@@ -953,7 +1194,7 @@ func (n *Notifier) SendWebhookByConfig(ctx context.Context, config map[string]in
 		ID:       "test-agent",
 		Name:     "测试探针",
 		Hostname: "test-host",
-		IP:       "127.0.0.1",
+		IPv4:     "127.0.0.1",
 	}
 	record := &models.AlertRecord{
 		AlertType:   "test",
@@ -988,7 +1229,7 @@ func (n *Notifier) SendTestNotification(ctx context.Context, channelType string,
 			ID:       "test-agent",
 			Name:     "测试探针",
 			Hostname: "test-host",
-			IP:       "127.0.0.1",
+			IPv4:     "127.0.0.1",
 		}
 		record := &models.AlertRecord{
 			AlertType:   "test",

@@ -114,6 +114,9 @@ func AutoStep(start, end time.Time) time.Duration {
 	r := end.Sub(start)
 
 	switch {
+	case r <= 5*time.Minute:
+		// 实时/极短窗口：与探针 1s 采集对齐，避免聚合丢点
+		return 1 * time.Second
 	case r <= time.Hour:
 		return 10 * time.Second
 	case r <= 3*time.Hour:
@@ -218,6 +221,40 @@ func (c *VMClient) Query(ctx context.Context, query string) (*QueryResult, error
 	}
 
 	return &result, nil
+}
+
+// DeleteSeries 删除时间序列数据
+func (c *VMClient) DeleteSeries(ctx context.Context, matchers []string) error {
+	if len(matchers) == 0 {
+		return nil
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+
+	params := url.Values{}
+	for _, matcher := range matchers {
+		params.Add("match[]", matcher)
+	}
+
+	reqURL := fmt.Sprintf("%s/api/v1/admin/tsdb/delete_series?%s", c.baseURL, params.Encode())
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, reqURL, nil)
+	if err != nil {
+		return fmt.Errorf("create request failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete series failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete series failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 // ConvertToDataPoints 将查询结果转换为数据点列表

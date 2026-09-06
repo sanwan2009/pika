@@ -2,9 +2,10 @@ package repo
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/dushixiang/pika/internal/models"
 	"github.com/go-orz/orz"
+	"github.com/pika-monitor/pika/internal/models"
 	"gorm.io/gorm"
 )
 
@@ -31,24 +32,45 @@ func (r *AgentRepo) UpdateStatus(ctx context.Context, agentID string, status int
 
 	return r.db.WithContext(ctx).
 		Model(&models.Agent{}).
-		Where("id = ?", agentID).
+		Where("id = ? AND enabled = ?", agentID, true).
 		Updates(m).Error
+}
+
+// IsEnabled 查询探针是否允许接收并处理数据。
+func (r *AgentRepo) IsEnabled(ctx context.Context, agentID string) (bool, error) {
+	var agent models.Agent
+	if err := r.db.WithContext(ctx).
+		Select("id", "enabled").
+		Where("id = ?", agentID).
+		First(&agent).Error; err != nil {
+		return false, err
+	}
+	return agent.Enabled, nil
 }
 
 // FindOnlineAgents 查找所有在线探针
 func (r *AgentRepo) FindOnlineAgents(ctx context.Context) ([]models.Agent, error) {
 	var agents []models.Agent
 	err := r.db.WithContext(ctx).
-		Where("status = ?", 1).
+		Where("status = ? AND enabled = ?", 1, true).
 		Find(&agents).Error
 	return agents, err
 }
 
-// FindByIP 根据IP查找探针
+// FindEnabledAgents 查找所有启用的探针。
+func (r *AgentRepo) FindEnabledAgents(ctx context.Context) ([]models.Agent, error) {
+	var agents []models.Agent
+	err := r.db.WithContext(ctx).
+		Where("enabled = ?", true).
+		Find(&agents).Error
+	return agents, err
+}
+
+// FindByIP 根据公网IP查找探针
 func (r *AgentRepo) FindByIP(ctx context.Context, ip string) (*models.Agent, error) {
 	var agent models.Agent
 	err := r.db.WithContext(ctx).
-		Where("ip = ?", ip).
+		Where("ip = ? or ipv4 = ? OR ipv6 = ?", ip, ip, ip).
 		First(&agent).Error
 	if err != nil {
 		return nil, err
@@ -68,11 +90,11 @@ func (r *AgentRepo) FindByHostname(ctx context.Context, hostname string) (*model
 	return &agent, nil
 }
 
-// FindByHostnameAndIP 根据主机名和IP查找探针
+// FindByHostnameAndIP 根据主机名和公网IP查找探针
 func (r *AgentRepo) FindByHostnameAndIP(ctx context.Context, hostname, ip string) (*models.Agent, error) {
 	var agent models.Agent
 	err := r.db.WithContext(ctx).
-		Where("hostname = ? AND ip = ?", hostname, ip).
+		Where("hostname = ? AND (ipv4 = ? OR ipv6 = ?)", hostname, ip, ip).
 		First(&agent).Error
 	if err != nil {
 		return nil, err
@@ -122,14 +144,6 @@ func (r *AgentRepo) ListAuditResults(ctx context.Context, agentID string) ([]mod
 	return audits, err
 }
 
-// UpdateInfo 更新探针信息（名称、平台、位置、到期时间）
-func (r *AgentRepo) UpdateInfo(ctx context.Context, agentID string, updates map[string]interface{}) error {
-	return r.db.WithContext(ctx).
-		Model(&models.Agent{}).
-		Where("id = ?", agentID).
-		Updates(updates).Error
-}
-
 // GetStatistics 获取探针统计数据
 func (r *AgentRepo) GetStatistics(ctx context.Context) (total int64, online int64, err error) {
 	// 获取总数
@@ -143,7 +157,7 @@ func (r *AgentRepo) GetStatistics(ctx context.Context) (total int64, online int6
 	// 获取在线数量
 	err = r.db.WithContext(ctx).
 		Model(&models.Agent{}).
-		Where("status = ?", 1).
+		Where("status = ? AND enabled = ?", 1, true).
 		Count(&online).Error
 
 	return total, online, err
@@ -172,7 +186,7 @@ func (r *AgentRepo) DeleteAuditResults(ctx context.Context, agentID string) erro
 func (r *AgentRepo) FindPublicAgents(ctx context.Context) ([]models.Agent, error) {
 	var agents []models.Agent
 	err := r.db.WithContext(ctx).
-		Where("visibility = ?", "public").
+		Where("visibility = ? AND enabled = ?", "public", true).
 		Find(&agents).Error
 	return agents, err
 }
@@ -181,12 +195,50 @@ func (r *AgentRepo) FindPublicAgents(ctx context.Context) ([]models.Agent, error
 func (r *AgentRepo) FindPublicAgentByID(ctx context.Context, id string) (*models.Agent, error) {
 	var agent models.Agent
 	err := r.db.WithContext(ctx).
-		Where("id = ? AND visibility = ?", id, "public").
+		Where("id = ? AND visibility = ? AND enabled = ?", id, "public", true).
 		First(&agent).Error
 	if err != nil {
 		return nil, err
 	}
 	return &agent, nil
+}
+
+// FindByShortID 通过ID前缀查找探针（短ID匹配）
+func (r *AgentRepo) FindByShortID(ctx context.Context, shortID string) (models.Agent, error) {
+	var agents []models.Agent
+	err := r.db.WithContext(ctx).
+		Where("id LIKE ?", shortID+"-%").
+		Limit(2).
+		Find(&agents).Error
+	if err != nil {
+		return models.Agent{}, err
+	}
+	if len(agents) == 0 {
+		return models.Agent{}, gorm.ErrRecordNotFound
+	}
+	if len(agents) > 1 {
+		return models.Agent{}, fmt.Errorf("短ID匹配到多个探针，请使用完整ID")
+	}
+	return agents[0], nil
+}
+
+// FindPublicAgentByShortID 通过ID前缀查找公开可见探针（短ID匹配）
+func (r *AgentRepo) FindPublicAgentByShortID(ctx context.Context, shortID string) (*models.Agent, error) {
+	var agents []models.Agent
+	err := r.db.WithContext(ctx).
+		Where("id LIKE ? AND visibility = ? AND enabled = ?", shortID+"-%", "public", true).
+		Limit(2).
+		Find(&agents).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(agents) == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	if len(agents) > 1 {
+		return nil, fmt.Errorf("短ID匹配到多个探针，请使用完整ID")
+	}
+	return &agents[0], nil
 }
 
 // GetAllTags 获取所有探针的标签（去重）
@@ -220,19 +272,53 @@ func (r *AgentRepo) GetAllTags(ctx context.Context) ([]string, error) {
 	return tags, nil
 }
 
-// FindAgentsWithTrafficReset 查询配置了流量自动重置的探针
-func (r *AgentRepo) FindAgentsWithTrafficReset(ctx context.Context) ([]models.Agent, error) {
+// FindIDsByTags 查询拥有任意一个指定标签的探针 ID 列表（在应用层过滤，标签存储为 JSON 列）
+func (r *AgentRepo) FindIDsByTags(ctx context.Context, tags []string) ([]string, error) {
+	if len(tags) == 0 {
+		return nil, nil
+	}
+
 	var agents []models.Agent
-	err := r.db.WithContext(ctx).
-		Where("traffic_reset_day > 0").
-		Find(&agents).Error
-	return agents, err
+	if err := r.db.WithContext(ctx).
+		Select("id", "tags").
+		Find(&agents).Error; err != nil {
+		return nil, err
+	}
+
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		if tag != "" {
+			tagSet[tag] = struct{}{}
+		}
+	}
+
+	ids := make([]string, 0)
+	for _, agent := range agents {
+		for _, tag := range agent.Tags {
+			if _, ok := tagSet[tag]; ok {
+				ids = append(ids, agent.ID)
+				break
+			}
+		}
+	}
+	return ids, nil
 }
 
-// UpdateTrafficStats 批量更新流量统计字段
-func (r *AgentRepo) UpdateTrafficStats(ctx context.Context, agentID string, updates map[string]interface{}) error {
-	return r.db.WithContext(ctx).
-		Model(&models.Agent{}).
-		Where("id = ?", agentID).
-		Updates(updates).Error
+// FindAgentsWithTrafficReset 查询配置了流量自动重置的探针
+func (r *AgentRepo) FindAgentsWithTrafficReset(ctx context.Context) ([]models.Agent, error) {
+	var allAgents []models.Agent
+	err := r.db.WithContext(ctx).Find(&allAgents).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 在应用层过滤配置了流量重置的探针
+	var agents []models.Agent
+	for _, agent := range allAgents {
+		stats := agent.TrafficStats.Data()
+		if stats.ResetDay > 0 {
+			agents = append(agents, agent)
+		}
+	}
+	return agents, nil
 }

@@ -1,26 +1,31 @@
-import {useRef, useState} from 'react';
-import type {ActionType, ProColumns} from '@ant-design/pro-components';
-import {ProTable} from '@ant-design/pro-components';
-import {App, Divider, Select, Space, Tag} from 'antd';
+import React, {useState} from 'react';
+import {useSearchParams} from 'react-router-dom';
+import {App, Divider, Select, Tag} from 'antd';
+import type {ColumnsType, TablePaginationConfig} from 'antd/es/table';
 import {Trash2} from 'lucide-react';
 import {clearAlertRecords, getAlertRecords} from '@/api/alert.ts';
 import type {AlertRecord} from '@/types';
 import dayjs from 'dayjs';
 import {getErrorMessage} from '@/lib/utils';
-import {PageHeader} from '@/components';
-import {getAgentPaging} from '@/api/agent.ts';
-import {useQuery} from '@tanstack/react-query';
+import {PageHeader} from '@/components/PageHeader';
+import {AdminDataTable} from '@/components/AdminDataTable';
+import {useQuery, useQueryClient} from '@tanstack/react-query';
+import {listAgentsByAdmin} from "@/api/agent.ts";
 
 const AlertRecordList = () => {
     const {message: messageApi, modal} = App.useApp();
-    const actionRef = useRef<ActionType>(null);
+    const queryClient = useQueryClient();
+    const [searchParams, setSearchParams] = useSearchParams();
     const [selectedAgentId, setSelectedAgentId] = useState<string>('');
+
+    const pageIndex = Number(searchParams.get('pageIndex')) || 1;
+    const pageSize = Number(searchParams.get('pageSize')) || 20;
 
     // 使用 react-query 获取探针列表
     const {data: agentsData} = useQuery({
         queryKey: ['agents-for-alert-filter'],
         queryFn: async () => {
-            const response = await getAgentPaging(1, 1000);
+            const response = await listAgentsByAdmin();
             return response.data;
         },
     });
@@ -31,9 +36,11 @@ const AlertRecordList = () => {
         memory: '内存使用率',
         disk: '磁盘使用率',
         network: '网速',
+        traffic: '流量',
         cert: 'HTTPS证书',
         service: '服务下线',
         agent_offline: '探针离线',
+        agent_expire: '机器到期',
     };
 
     // 告警级别映射
@@ -52,6 +59,7 @@ const AlertRecordList = () => {
         const config = {
             firing: {color: 'red', text: '告警中'},
             resolved: {color: 'green', text: '已恢复'},
+            notice: {color: 'blue', text: '通知'},
         };
         const statusConfig = config[status as keyof typeof config] || {color: 'default', text: status};
         return <Tag color={statusConfig.color}>{statusConfig.text}</Tag>;
@@ -84,11 +92,38 @@ const AlertRecordList = () => {
     };
 
     // 计算探针选项
-    const agentOptions = agentsData?.items?.map((agent) => ({
+    const agentOptions = agentsData?.map((agent) => ({
         label: agent.name || agent.id,
         value: agent.id,
     })) || [];
 
+    const {
+        data: alertPaging,
+        isLoading,
+        isFetching,
+    } = useQuery({
+        queryKey: ['admin', 'alert-records', pageIndex, pageSize, selectedAgentId],
+        queryFn: () => getAlertRecords(pageIndex, pageSize, selectedAgentId || undefined),
+    });
+
+    // 处理表格变化
+    const handleTableChange = (newPagination: TablePaginationConfig) => {
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set('pageIndex', String(newPagination.current || 1));
+        nextParams.set('pageSize', String(newPagination.pageSize || pageSize));
+        setSearchParams(nextParams);
+    };
+
+    // 处理探针筛选变化
+    const handleAgentChange = (value: string) => {
+        setSelectedAgentId(value || '');
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set('pageIndex', '1');
+        nextParams.set('pageSize', String(pageSize));
+        setSearchParams(nextParams);
+    };
+
+    // 清空记录
     const handleClear = () => {
         modal.confirm({
             title: '确认清空',
@@ -102,7 +137,7 @@ const AlertRecordList = () => {
                 try {
                     await clearAlertRecords(selectedAgentId || undefined);
                     messageApi.success('清空成功');
-                    actionRef.current?.reload();
+                    queryClient.invalidateQueries({queryKey: ['admin', 'alert-records']});
                 } catch (error: unknown) {
                     messageApi.error(getErrorMessage(error, '清空失败'));
                 }
@@ -110,32 +145,41 @@ const AlertRecordList = () => {
         });
     };
 
-    const columns: ProColumns<AlertRecord>[] = [
+    const columns: ColumnsType<AlertRecord> = [
         {
             title: 'ID',
             dataIndex: 'id',
             width: 80,
-            search: false,
         },
         {
             title: '探针',
             dataIndex: 'agentName',
             width: 200,
             ellipsis: true,
-            search: false,
         },
         {
             title: '告警类型',
             dataIndex: 'alertType',
             width: 120,
             render: (_, record) => alertTypeMap[record.alertType] || record.alertType,
-            search: false,
+        },
+        {
+            title: '规则',
+            dataIndex: 'configName',
+            width: 130,
+            ellipsis: true,
+            render: (_, record) => {
+                if (record.configName) {
+                    return record.configName;
+                }
+                return (!record.configId || record.configId === 'global') ? '默认规则' : record.configId;
+            },
         },
         {
             title: '告警消息',
             dataIndex: 'message',
+            width: 320,
             ellipsis: true,
-            search: false,
         },
         {
             title: '阈值',
@@ -145,7 +189,7 @@ const AlertRecordList = () => {
                 if (record.alertType === 'network') {
                     return `${record.threshold.toFixed(2)} MB/s`;
                 }
-                if (record.alertType === 'cert') {
+                if (record.alertType === 'cert' || record.alertType === 'agent_expire') {
                     return `${record.threshold.toFixed(0)} 天`;
                 }
                 if (record.alertType === 'service' || record.alertType === 'agent_offline') {
@@ -153,17 +197,16 @@ const AlertRecordList = () => {
                 }
                 return `${record.threshold.toFixed(2)}%`;
             },
-            search: false,
         },
         {
-            title: '实际值',
+            title: '告警值',
             dataIndex: 'actualValue',
             width: 100,
             render: (_, record) => {
                 if (record.alertType === 'network') {
                     return `${record.actualValue.toFixed(2)} MB/s`;
                 }
-                if (record.alertType === 'cert') {
+                if (record.alertType === 'cert' || record.alertType === 'agent_expire') {
                     return `${record.actualValue.toFixed(0)} 天`;
                 }
                 if (record.alertType === 'service' || record.alertType === 'agent_offline') {
@@ -171,29 +214,45 @@ const AlertRecordList = () => {
                 }
                 return `${record.actualValue.toFixed(2)}%`;
             },
-            search: false,
+        },
+        {
+            title: '恢复值',
+            dataIndex: 'resolvedValue',
+            width: 100,
+            render: (_, record) => {
+                // 只有已恢复的告警才显示恢复值
+                if (record.status !== 'resolved' || record.resolvedValue === undefined) {
+                    return '-';
+                }
+                if (record.alertType === 'network') {
+                    return `${record.resolvedValue.toFixed(2)} MB/s`;
+                }
+                if (record.alertType === 'cert' || record.alertType === 'agent_expire') {
+                    return `${record.resolvedValue.toFixed(0)} 天`;
+                }
+                if (record.alertType === 'service' || record.alertType === 'agent_offline') {
+                    return record.resolvedValue === 0 ? '已在线' : `${record.resolvedValue.toFixed(0)} 秒`;
+                }
+                return `${record.resolvedValue.toFixed(2)}%`;
+            },
         },
         {
             title: '告警级别',
             dataIndex: 'level',
             width: 100,
             render: (_, record) => getLevelTag(record.level),
-            search: false,
         },
         {
             title: '状态',
             dataIndex: 'status',
             width: 100,
             render: (_, record) => getStatusTag(record.status),
-            search: false,
         },
         {
             title: '触发时间',
             dataIndex: 'firedAt',
             width: 180,
             render: (_, record) => dayjs(record.firedAt).format('YYYY-MM-DD HH:mm:ss'),
-            search: false,
-            sorter: true,
         },
         {
             title: '恢复时间',
@@ -201,22 +260,33 @@ const AlertRecordList = () => {
             width: 180,
             render: (_, record) =>
                 record.resolvedAt ? dayjs(record.resolvedAt).format('YYYY-MM-DD HH:mm:ss') : '-',
-            search: false,
         },
         {
             title: '持续时间',
             dataIndex: 'duration',
             width: 130,
             render: (_, record) => formatDuration(record.firedAt, record.resolvedAt, record.status),
-            search: false,
         },
     ];
 
     return (
-        <div>
+        <div className={'space-y-4'}>
             <PageHeader
                 title="告警记录"
-                description="查看和管理系统的告警记录"
+                extra={(
+                    <Select
+                        placeholder="选择探针"
+                        allowClear
+                        showSearch={{
+                            filterOption: (inputValue, option) =>
+                                (option?.label?.toString() ?? '').toLowerCase().includes(inputValue.toLowerCase()),
+                        }}
+                        style={{width: 200}}
+                        value={selectedAgentId || undefined}
+                        onChange={handleAgentChange}
+                        options={agentOptions}
+                    />
+                )}
                 actions={[
                     {
                         key: 'clear',
@@ -229,66 +299,23 @@ const AlertRecordList = () => {
                 ]}
             />
 
-            <Divider/>
-
-            <ProTable<AlertRecord>
-                columns={columns}
-                actionRef={actionRef}
-                rowKey="id"
-                request={async (params, sort) => {
-                    try {
-                        const {pageSize = 20, current = 1} = params;
-
-                        const result = await getAlertRecords(
-                            current,
-                            pageSize,
-                            selectedAgentId || undefined,
-                        );
-
-                        return {
-                            data: result.items || [],
-                            success: true,
-                            total: result.total || 0,
-                        };
-                    } catch (error) {
-                        messageApi.error(getErrorMessage(error, '获取告警记录失败'));
-                        return {
-                            data: [],
-                            success: false,
-                            total: 0,
-                        };
-                    }
-                }}
-                search={false}
-                toolbar={{
-                    actions: [
-                        <Space key="toolbar">
-                            <Select
-                                placeholder="选择探针"
-                                allowClear
-                                showSearch
-                                style={{width: 200}}
-                                value={selectedAgentId || undefined}
-                                onChange={(value) => {
-                                    setSelectedAgentId(value || '');
-                                    actionRef.current?.reload();
-                                }}
-                                filterOption={(input, option) =>
-                                    (option?.label?.toString() ?? '')
-                                        .toLowerCase()
-                                        .includes(input.toLowerCase())
-                                }
-                                options={agentOptions}
-                            />
-                        </Space>,
-                    ],
-                }}
-                pagination={{
-                    defaultPageSize: 20,
-                    showSizeChanger: true,
-                    showQuickJumper: true,
-                    pageSizeOptions: ['10', '20', '50', '100'],
-                }}
+            <AdminDataTable<AlertRecord>
+                    columns={columns}
+                    dataSource={alertPaging?.items || []}
+                    loading={isLoading || isFetching}
+                    rowKey="id"
+                    scroll={{x: 1700}}
+                    tableLayout="fixed"
+                    pagination={{
+                        current: pageIndex,
+                        pageSize,
+                        total: alertPaging?.total || 0,
+                        showSizeChanger: true,
+                        showQuickJumper: true,
+                        pageSizeOptions: ['10', '20', '50', '100'],
+                        showTotal: (total) => `共 ${total} 条`,
+                    }}
+                    onChange={handleTableChange}
             />
         </div>
     );

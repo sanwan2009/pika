@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dushixiang/pika/internal/protocol"
+	"github.com/pika-monitor/pika/internal/protocol"
 )
 
 // KernelAssetsCollector 内核资产收集器

@@ -1,10 +1,7 @@
-version: '3.8'
-
 services:
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.131.0
     container_name: victoriametrics
-    restart: always
     command:
       - "-retentionPeriod=7d"  # 保留 7 天数据
       - "-storageDataPath=/victoria-metrics-data"
@@ -13,6 +10,7 @@ services:
       - "127.0.0.1:8428:8428"  # API, PromQL, insert, select
     volumes:
       - ./data/vmdata:/victoria-metrics-data
+    restart: always
     networks:
       - pika-network
   pika:
@@ -27,7 +25,7 @@ services:
       - "8080:8080"
     depends_on:
       - victoriametrics
-    restart: unless-stopped
+    restart: always
     networks:
       - pika-network
 

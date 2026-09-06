@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/dushixiang/pika/internal/protocol"
-	"github.com/dushixiang/pika/internal/vmclient"
+	"github.com/pika-monitor/pika/internal/protocol"
+	"github.com/pika-monitor/pika/internal/vmclient"
 	"gorm.io/gorm"
 )
 

@@ -3,8 +3,8 @@ package repo
 import (
 	"context"
 
-	"github.com/dushixiang/pika/internal/models"
 	"github.com/go-orz/orz"
+	"github.com/pika-monitor/pika/internal/models"
 	"gorm.io/gorm"
 )
 
@@ -67,6 +67,36 @@ func (r *MonitorRepo) FindByEnabled(ctx context.Context, enabled bool) ([]models
 		return nil, err
 	}
 	return monitors, nil
+}
+
+// FindByAnyTags 查询引用了任意一个指定标签的监控任务（在应用层过滤，标签存储为 JSON 列）
+func (r *MonitorRepo) FindByAnyTags(ctx context.Context, tags []string) ([]models.MonitorTask, error) {
+	if len(tags) == 0 {
+		return nil, nil
+	}
+
+	var monitors []models.MonitorTask
+	if err := r.GetDB(ctx).Find(&monitors).Error; err != nil {
+		return nil, err
+	}
+
+	tagSet := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		if tag != "" {
+			tagSet[tag] = struct{}{}
+		}
+	}
+
+	filtered := make([]models.MonitorTask, 0)
+	for _, monitor := range monitors {
+		for _, tag := range monitor.Tags {
+			if _, ok := tagSet[tag]; ok {
+				filtered = append(filtered, monitor)
+				break
+			}
+		}
+	}
+	return filtered, nil
 }
 
 // FindByEnabledAndType 查找所有启用的监控任务

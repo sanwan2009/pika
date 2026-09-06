@@ -3,8 +3,8 @@ package repo
 import (
 	"context"
 
-	"github.com/dushixiang/pika/internal/models"
 	"github.com/go-orz/orz"
+	"github.com/pika-monitor/pika/internal/models"
 	"gorm.io/gorm"
 )
 
@@ -61,4 +61,14 @@ func (r *DDNSConfigRepo) FindAllEnabled(ctx context.Context) ([]models.DDNSConfi
 		Where("enabled = ?", true).
 		Find(&configs).Error
 	return configs, err
+}
+
+// ListAgentIDs 返回所有配置关联的探针ID（去重）
+func (r *DDNSConfigRepo) ListAgentIDs(ctx context.Context) ([]string, error) {
+	var agentIDs []string
+	err := r.db.WithContext(ctx).
+		Model(&models.DDNSConfig{}).
+		Distinct().
+		Pluck("agent_id", &agentIDs).Error
+	return agentIDs, err
 }

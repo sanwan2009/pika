@@ -50,6 +50,7 @@ App:
     Issuer: "https://your-oidc-provider.com"
     ClientID: "your-client-id"
     ClientSecret: "your-client-secret"
+    RedirectURL: "https://your-domain.com/admin/oidc/callback"
 
   # 可选：启用 GitHub OAuth
   GitHub:
@@ -58,11 +59,33 @@ App:
     ClientSecret: "your-github-client-secret"
 ```
 
+启用 OIDC 时，`Issuer`、`ClientID`、`ClientSecret` 和 `RedirectURL` 均为必填项。`RedirectURL` 应填写用户浏览器可访问的 Pika 前端回调地址，路径固定为 `/admin/oidc/callback`，并且必须与 OIDC Provider 中登记的回调地址完全一致。例如，本地部署可填写 `http://localhost:8080/admin/oidc/callback`，通过 HTTPS 域名访问时可填写 `https://your-domain.com/admin/oidc/callback`。
+
 ### 生成新的管理员密码
 
 ```bash
 # 使用 htpasswd 工具
 htpasswd -nBC 12 '' | tr -d ':\n'
+```
+
+或者使用在线网站生成密码
+
+https://tools.typesafe.cn/bcrypt
+
+### 推荐使用第三方认证服务
+
+为什么推荐使用第三方认证服务？
+
+因为用户权限是一套非常通用的需求，例如登录、注销、修改密码、忘记密码、二次认证等等，这些都不是本系统的重点，没有必要去重新实现，使用第三方认证服务可以避免这个问题。
+
+- 优先推荐 Github OAuth 认证
+- 建议使用 [next-terminal](https://github.com/next-terminal/next-terminal) 作为 OIDC 认证服务，支持 OTP 认证，Passkey 认证。
+  详细文档 https://docs.next-terminal.com/usage/oidc_server.html
+
+### 修改配置文件后需要重启服务
+
+```shell
+docker compose restart pika
 ```
 
 ## 生产环境部署建议
@@ -152,10 +175,15 @@ ports:
 
 你可以参考 [agent.example.yaml](../cmd/agent/agent.example.yaml) 修改 `collector` 下的 `network_include` 或者 `network_exclude` 配置。
 
+### 多磁盘采集
+
+本系统默认只采集根目录和 C 盘，其他磁盘需要手动配置。
+
+你可以参考 [agent.example.yaml](../cmd/agent/agent.example.yaml) 修改 `collector` 下的 `disk_include` 配置。
+
 ### IP 归属地
 
 - 注意：GeoIP 数据库需要手动下载并配置路径
 - 下载地址 https://github.com/P3TERX/GeoLite.mmdb
 - 下载后将 config.yaml 中的 GeoIP.Enabled 配置启用，并把路径替换为您的实际路径
 - 需要同步修改 docker-compose.yml 中的文件映射
-

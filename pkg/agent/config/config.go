@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/dushixiang/pika/pkg/agent/utils"
+	"github.com/pika-monitor/pika/pkg/agent/utils"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,16 +47,28 @@ type ServerConfig struct {
 type AgentConfig struct {
 	// Agent 名称（默认使用主机名）
 	Name string `yaml:"name"`
+
+	// 日志等级（debug, info, warn, error，默认为 info）
+	LogLevel string `yaml:"log_level"`
+
+	// 日志文件路径（默认为空，输出到控制台）
+	LogFile string `yaml:"log_file"`
+
+	// 日志文件最大大小（MB，默认 100MB）
+	LogMaxSize int `yaml:"log_max_size"`
+
+	// 日志文件最大备份数（默认 3）
+	LogMaxBackups int `yaml:"log_max_backups"`
+
+	// 日志文件最大保留天数（默认 28 天）
+	LogMaxAge int `yaml:"log_max_age"`
+
+	// 是否压缩旧日志文件（默认 true）
+	LogCompress bool `yaml:"log_compress"`
 }
 
 // CollectorConfig 采集器配置
 type CollectorConfig struct {
-	// 数据采集间隔（秒）
-	Interval int `yaml:"interval"`
-
-	// 心跳间隔（秒）
-	HeartbeatInterval int `yaml:"heartbeat_interval"`
-
 	// 网络采集包含的网卡列表（白名单，支持正则表达式）
 	// 如果配置了此项，则只采集匹配的网卡，忽略 NetworkExclude
 	// 例如: ["^eth0$", "^en0$", "^ens.*"]
@@ -93,12 +105,15 @@ func DefaultConfig() *Config {
 			InsecureSkipVerify: false,
 		},
 		Agent: AgentConfig{
-			Name: "",
+			Name:          "",
+			LogLevel:      "info",
+			LogFile:       "",
+			LogMaxSize:    100,
+			LogMaxBackups: 3,
+			LogMaxAge:     28,
+			LogCompress:   true,
 		},
-		Collector: CollectorConfig{
-			Interval:          5,
-			HeartbeatInterval: 30,
-		},
+		Collector: CollectorConfig{},
 		AutoUpdate: AutoUpdateConfig{
 			Enabled:       true,
 			CheckInterval: "10m",
@@ -108,8 +123,12 @@ func DefaultConfig() *Config {
 
 // GetDefaultConfigPath 获取默认配置文件路径
 func GetDefaultConfigPath() string {
-	var homeDir = utils.GetSafeHomeDir()
-	return filepath.Join(homeDir, ".pika", "agent.yaml")
+	return filepath.Join(GetDataDir(), "agent.yaml")
+}
+
+// GetDataDir 获取 Agent 数据目录
+func GetDataDir() string {
+	return filepath.Join(utils.GetSafeHomeDir(), ".pika")
 }
 
 // Load 加载配置文件
@@ -177,39 +196,27 @@ func (c *Config) Save(path string) error {
 
 // Validate 验证配置
 func (c *Config) Validate() error {
-	if c.Server.Endpoint == "" {
-		return fmt.Errorf("服务器地址不能为空")
-	}
-
-	if c.Server.APIKey == "" {
-		return fmt.Errorf("API Key 不能为空")
-	}
-
-	if c.Collector.Interval <= 0 {
-		return fmt.Errorf("采集间隔必须大于 0")
-	}
-
-	if c.Collector.HeartbeatInterval <= 0 {
-		return fmt.Errorf("心跳间隔必须大于 0")
-	}
-
 	if c.AutoUpdate.Enabled {
 		if _, err := time.ParseDuration(c.AutoUpdate.CheckInterval); err != nil {
 			return fmt.Errorf("更新检查间隔格式错误: %w", err)
 		}
 	}
 
+	// 验证日志等级
+	if c.Agent.LogLevel == "" {
+		c.Agent.LogLevel = "info"
+	}
+	validLogLevels := map[string]bool{
+		"debug": true,
+		"info":  true,
+		"warn":  true,
+		"error": true,
+	}
+	if !validLogLevels[c.Agent.LogLevel] {
+		return fmt.Errorf("无效的日志等级: %s (可选值: debug, info, warn, error)", c.Agent.LogLevel)
+	}
+
 	return nil
-}
-
-// GetCollectorInterval 获取采集间隔时长
-func (c *Config) GetCollectorInterval() time.Duration {
-	return time.Duration(c.Collector.Interval) * time.Second
-}
-
-// GetHeartbeatInterval 获取心跳间隔时长
-func (c *Config) GetHeartbeatInterval() time.Duration {
-	return time.Duration(c.Collector.HeartbeatInterval) * time.Second
 }
 
 // GetUpdateCheckInterval 获取更新检查间隔时长
@@ -245,7 +252,7 @@ func (c *Config) GetDownloadURL() string {
 	if runtime.GOOS == "windows" {
 		filename += ".exe"
 	}
-	return c.Endpoint() + "/api/agent/downloads/" + filename
+	return c.Endpoint() + "/api/agent/downloads/" + filename + "?key=" + c.Server.APIKey
 }
 
 func (c *Config) Endpoint() string {
@@ -269,6 +276,7 @@ func DefaultNetworkExcludePatterns() []string {
 		"^virbr.*",   // KVM/libvirt 网桥
 		"^flannel.*", // Kubernetes Flannel
 		"^cni.*",     // Container Network Interface
+		"^tap.*",     // PVE/KVM 虚拟机 TAP 网卡
 		// macOS 虚拟接口
 		"^anpi\\d+$",   // Apple Network Process Interface
 		"^ap\\d+$",     // Apple Wireless Access Point
@@ -279,12 +287,14 @@ func DefaultNetworkExcludePatterns() []string {
 		"^stf\\d+$",    // 6to4 tunnel interface
 		"^utun\\d+$",   // User Tunnel (VPN)
 		"^vmenet\\d+$", // 虚拟机网络 (VMware/Parallels)
+		"^vmnet.*",     // 虚拟机网络 (VMware/Parallels/Fusion)
 		"^pktap\\d+$",  // Packet capture interface
 		"^ipsec\\d+$",  // IPSec interface
 		"^feth\\d+$",   // Fake ethernet interface
 		// Windows 虚拟接口
 		"^Loopback.*",
 		"^vEthernet.*",
+		".*[Tt]eredo.*", // Teredo 隧道伪接口 (IPv6 over IPv4)
 	}
 }
 
@@ -368,23 +378,21 @@ func (c *Config) ShouldExcludeNetworkInterface(interfaceName string) bool {
 }
 
 // GetDiskInclude 获取磁盘包含的挂载点列表（白名单）
-// 如果配置为空，返回默认的根分区匹配规则
-// Linux/macOS: ["/"]
-// Windows: ["C:"]
+// 返回 nil 表示未配置白名单，采集所有挂载点
 func (c *Config) GetDiskInclude() []string {
 	if len(c.Collector.DiskInclude) == 0 {
-		if runtime.GOOS == "windows" {
-			return []string{"C:"}
-		}
-		return []string{"/"}
+		return nil
 	}
 	return c.Collector.DiskInclude
 }
 
 // ShouldIncludeDiskMountPoint 检查挂载点是否应该被采集
-// 只有在 DiskInclude 白名单中的挂载点才会被采集
+// 未配置白名单时采集所有挂载点
 func (c *Config) ShouldIncludeDiskMountPoint(mountPoint string) bool {
 	includeMounts := c.GetDiskInclude()
+	if len(includeMounts) == 0 {
+		return true // 未配置白名单，采集所有
+	}
 	for _, mount := range includeMounts {
 		if mountPoint == mount {
 			return true

@@ -4,9 +4,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/service"
-	"github.com/labstack/echo/v4"
+	"github.com/go-orz/orz"
+	"github.com/labstack/echo/v5"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/service"
 	"go.uber.org/zap"
 )
 
@@ -68,7 +69,7 @@ func maskSensitiveData(config map[string]interface{}) map[string]interface{} {
 }
 
 // GetAll 获取所有 DNS Provider 配置（脱敏）
-func (h *DNSProviderHandler) GetAll(c echo.Context) error {
+func (h *DNSProviderHandler) GetAll(c *echo.Context) error {
 	ctx := c.Request().Context()
 
 	providers, err := h.propertyService.GetDNSProviderConfigs(ctx)
@@ -91,7 +92,7 @@ func (h *DNSProviderHandler) GetAll(c echo.Context) error {
 }
 
 // Upsert 创建或更新 DNS Provider 配置
-func (h *DNSProviderHandler) Upsert(c echo.Context) error {
+func (h *DNSProviderHandler) Upsert(c *echo.Context) error {
 	ctx := c.Request().Context()
 
 	var req DNSProviderRequest
@@ -126,11 +127,11 @@ func (h *DNSProviderHandler) Upsert(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "保存配置失败")
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{"message": "保存成功"})
+	return c.JSON(http.StatusOK, orz.Map{})
 }
 
 // Delete 删除 DNS Provider 配置
-func (h *DNSProviderHandler) Delete(c echo.Context) error {
+func (h *DNSProviderHandler) Delete(c *echo.Context) error {
 	ctx := c.Request().Context()
 	provider := c.Param("provider")
 
@@ -143,7 +144,7 @@ func (h *DNSProviderHandler) Delete(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "删除配置失败")
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{"message": "删除成功"})
+	return c.JSON(http.StatusOK, orz.Map{})
 }
 
 // validateProviderConfig 验证不同服务商的配置字段

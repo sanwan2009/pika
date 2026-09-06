@@ -1,6 +1,0 @@
-.ant-table-container .ant-table-body,
-.ant-table-container .ant-table-content {
-    scrollbar-width: thin;
-    scrollbar-color: #eaeaea transparent;
-    scrollbar-gutter: stable;
-}

@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/dushixiang/pika/internal/config"
 	"github.com/go-errors/errors"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/pika-monitor/pika/internal/config"
 	"go.uber.org/zap"
 )
 
@@ -167,15 +167,17 @@ func (s *AccountService) ValidateToken(tokenString string) (*JWTClaims, error) {
 
 // AuthConfig 认证配置
 type AuthConfig struct {
-	OIDCEnabled   bool `json:"oidcEnabled"`
-	GitHubEnabled bool `json:"githubEnabled"`
+	OIDCEnabled     bool `json:"oidcEnabled"`
+	GitHubEnabled   bool `json:"githubEnabled"`
+	PasswordEnabled bool `json:"passwordEnabled"`
 }
 
 // GetAuthConfig 获取认证配置
 func (s *AccountService) GetAuthConfig() *AuthConfig {
 	return &AuthConfig{
-		OIDCEnabled:   s.oidcService.IsEnabled(),
-		GitHubEnabled: s.githubService.IsEnabled(),
+		OIDCEnabled:     s.oidcService.IsEnabled(),
+		GitHubEnabled:   s.githubService.IsEnabled(),
+		PasswordEnabled: s.userService.IsEnabled(),
 	}
 }
 
@@ -186,12 +188,12 @@ type OIDCAuthURL struct {
 }
 
 // GetOIDCAuthURL 获取 OIDC 认证 URL
-func (s *AccountService) GetOIDCAuthURL() (*OIDCAuthURL, error) {
+func (s *AccountService) GetOIDCAuthURL(ctx context.Context) (*OIDCAuthURL, error) {
 	if !s.oidcService.IsEnabled() {
 		return nil, errors.New("OIDC 未启用")
 	}
 
-	authURL, state, err := s.oidcService.GenerateAuthURL()
+	authURL, state, err := s.oidcService.GenerateAuthURL(ctx)
 	if err != nil {
 		return nil, err
 	}

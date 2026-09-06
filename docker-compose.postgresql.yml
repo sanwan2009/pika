@@ -1,15 +1,13 @@
-version: '3.8'
-
 services:
   postgresql:
-    image: postgres:17
+    image: postgres:18
     container_name: pika-postgresql
     environment:
       POSTGRES_DB: pika
       POSTGRES_USER: pika
       POSTGRES_PASSWORD: pika
     volumes:
-      - ./data/postgresql:/var/lib/postgresql/data
+      - ./data/postgresql:/var/lib/postgresql
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
@@ -17,13 +15,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
+    restart: always
     networks:
       - pika-network
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.131.0
     container_name: victoriametrics
-    restart: always
     command:
       - "-retentionPeriod=7d"  # 保留 7 天数据
       - "-storageDataPath=/victoria-metrics-data"
@@ -32,6 +29,7 @@ services:
       - "127.0.0.1:8428:8428"  # API, PromQL, insert, select
     volumes:
       - ./data/vmdata:/victoria-metrics-data
+    restart: always
     networks:
       - pika-network
   pika:
@@ -39,6 +37,7 @@ services:
     container_name: pika-server
     volumes:
       - ./config.yaml:/app/config.yaml
+      - ./data/pika:/app/data
     # 开启 Geo 配置后打开下面的配置
     #  - ./GeoLite2-City.mmdb:/app/GeoLite2-City.mmdb
     ports:
@@ -48,11 +47,10 @@ services:
         condition: service_healthy
       victoriametrics:
         condition: service_started
-    restart: unless-stopped
+    restart: always
     networks:
       - pika-network
 
 networks:
   pika-network:
     driver: bridge
-

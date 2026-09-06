@@ -3,8 +3,8 @@ package repo
 import (
 	"context"
 
-	"github.com/dushixiang/pika/internal/models"
 	"github.com/go-orz/orz"
+	"github.com/pika-monitor/pika/internal/models"
 	"gorm.io/gorm"
 )
 

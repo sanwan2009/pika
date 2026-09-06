@@ -10,12 +10,24 @@ const OIDCCallback = () => {
 
     useEffect(() => {
         const handleCallback = async () => {
+            // 检查是否有错误参数
+            const error = searchParams.get('error');
+            if (error) {
+                const errorDescription = searchParams.get('error_description');
+                const errorMessage = errorDescription
+                    ? decodeURIComponent(errorDescription)
+                    : `认证失败: ${error}`;
+                messageApi.error(errorMessage);
+                navigate('/admin/login');
+                return;
+            }
+
             const code = searchParams.get('code');
             const state = searchParams.get('state');
 
             if (!code || !state) {
                 messageApi.error('缺少认证参数');
-                navigate('/login');
+                navigate('/admin/login');
                 return;
             }
 
@@ -31,7 +43,7 @@ const OIDCCallback = () => {
                 navigate('/admin/agents');
             } catch (error: any) {
                 messageApi.error(error.response?.data?.message || 'OIDC 认证失败');
-                navigate('/login');
+                navigate('/admin/login');
             }
         };
 
@@ -39,10 +51,10 @@ const OIDCCallback = () => {
     }, []);
 
     return (
-        <div className="min-h-screen flex items-center justify-center">
+        <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-zinc-950 transition-colors duration-300">
             <div className="text-center">
-                <div className="text-lg mb-2">正在处理 OIDC 认证...</div>
-                <div className="text-gray-500">请稍候</div>
+                <div className="text-lg mb-2 text-slate-900 dark:text-zinc-100 font-medium">正在处理 OIDC 认证...</div>
+                <div className="text-slate-500 dark:text-zinc-500">请稍候</div>
             </div>
         </div>
     );

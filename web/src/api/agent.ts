@@ -1,10 +1,16 @@
 import {del, get, post, put} from './request';
-import type {Agent, LatestMetrics, TrafficStats, UpdateTrafficConfigRequest} from '@/types';
+import type {
+    Agent,
+    LatestMetrics,
+    SSHLoginConfig,
+    SSHLoginEvent,
+    TrafficStats,
+    UpdateSSHLoginConfigRequest,
+    UpdateTrafficConfigRequest
+} from '@/types';
+import qs from "qs";
 
-export interface ListAgentsResponse {
-    items: Agent[];
-    total: number;
-}
+export type MetricsAggregation = 'avg' | 'max' | 'raw';
 
 export interface GetAgentMetricsRequest {
     agentId: string;
@@ -13,6 +19,8 @@ export interface GetAgentMetricsRequest {
     start?: number; // 自定义开始时间（毫秒时间戳）
     end?: number; // 自定义结束时间（毫秒时间戳）
     interface?: string; // 网卡过滤参数（仅对 network 类型有效）
+    // aggregation 缺省时后端返回 avg+max 两条 series（band 模式）；显式传值锁定为单条
+    aggregation?: MetricsAggregation;
 }
 
 // 新的统一数据格式
@@ -35,26 +43,12 @@ export interface GetAgentMetricsResponse {
 }
 
 // 管理员接口 - 获取所有探针（需要认证）
-export const getAgentPaging = (pageIndex: number = 1, pageSize: number = 10, hostname?: string, ip?: string, status?: string) => {
-    const params = new URLSearchParams();
-    params.append('pageIndex', pageIndex.toString());
-    params.append('pageSize', pageSize.toString());
-    if (hostname) {
-        params.append('hostname', hostname);
-    }
-    if (ip) {
-        params.append('ip', ip);
-    }
-    if (status) {
-        params.append('status', status);
-    }
-    params.set('sortOrder', 'asc');
-    params.set('sortField', 'name');
-    return get<ListAgentsResponse>(`/admin/agents?${params.toString()}`);
+export const listAgentsByAdmin = () => {
+    return get<Agent[]>('/admin/agents');
 };
 
 export const listAgents = () => {
-    return get<ListAgentsResponse>('/agents');
+    return get<Agent[]>('/agents');
 };
 
 export const getAgent = (id: string) => {
@@ -66,8 +60,12 @@ export const getAgentForAdmin = (id: string) => {
     return get<Agent>(`/admin/agents/${id}`);
 };
 
+export const getAgentLatestMetricsForAdmin = (agentId: string) => {
+    return get<LatestMetrics>(`/admin/agents/${agentId}/metrics/latest`);
+};
+
 export const getAgentMetrics = (params: GetAgentMetricsRequest) => {
-    const {agentId, type, range = '1h', start, end, interface: interfaceName} = params;
+    const {agentId, type, range = '1h', start, end, interface: interfaceName, aggregation} = params;
     const query = new URLSearchParams();
     query.append('type', type);
     if (start !== undefined && end !== undefined) {
@@ -78,6 +76,9 @@ export const getAgentMetrics = (params: GetAgentMetricsRequest) => {
     }
     if (interfaceName) {
         query.append('interface', interfaceName);
+    }
+    if (aggregation) {
+        query.append('aggregation', aggregation);
     }
     return get<GetAgentMetricsResponse>(`/agents/${agentId}/metrics?${query.toString()}`);
 };
@@ -447,16 +448,26 @@ export const updateAgentName = (agentId: string, name: string) => {
     return put(`/admin/agents/${agentId}/name`, {name});
 };
 
-// 更新探针信息（名称、标签、到期时间、可见性）
+// 更新探针信息（排序通过独立的拖动排序接口维护）
 export interface UpdateAgentInfoRequest {
     name?: string;
     tags?: string[];
     expireTime?: number;
     visibility?: string;
+    remark?: string;
 }
 
 export const updateAgentInfo = (agentId: string, data: UpdateAgentInfoRequest) => {
     return put(`/admin/agents/${agentId}`, data);
+};
+
+export interface UpdateAgentOrderResponse {
+    message: string;
+}
+
+// 按从前到后的顺序更新全部探针。
+export const updateAgentOrder = (agentIds: string[]) => {
+    return put<UpdateAgentOrderResponse>('/admin/agents/order', {agentIds});
 };
 
 // 获取探针统计数据
@@ -470,6 +481,11 @@ export interface AgentStatistics {
 // 删除探针
 export const deleteAgent = (agentId: string) => {
     return del(`/admin/agents/${agentId}`);
+};
+
+// 启用或禁用探针数据处理
+export const updateAgentEnabled = (agentId: string, enabled: boolean) => {
+    return post(`/admin/agents/${agentId}/${enabled ? 'enable' : 'disable'}`);
 };
 
 // 获取所有探针的标签
@@ -502,6 +518,19 @@ export const batchUpdateTags = (data: BatchUpdateTagsRequest) => {
     return post<BatchUpdateTagsResponse>('/admin/agents/batch/tags', data);
 };
 
+// 批量更新探针可见性
+export interface BatchUpdateVisibilityResponse {
+    message: string;
+    count: number;
+}
+
+export const batchUpdateAgentVisibility = (agentIds: string[], visibility: string) => {
+    return post<BatchUpdateVisibilityResponse>('/admin/agents/batch/visibility', {
+        agentIds,
+        visibility,
+    });
+};
+
 // 流量统计相关接口
 
 // 更新流量配置（管理员接口）
@@ -509,9 +538,9 @@ export const updateTrafficConfig = (agentId: string, data: UpdateTrafficConfigRe
     return put(`/admin/agents/${agentId}/traffic-config`, data);
 };
 
-// 获取流量统计（公开接口，支持可选认证）
+// 获取流量统计（管理员接口）
 export const getTrafficStats = (agentId: string) => {
-    return get<TrafficStats>(`/agents/${agentId}/traffic`);
+    return get<TrafficStats>(`/admin/agents/${agentId}/traffic`);
 };
 
 // 手动重置流量（管理员接口）
@@ -526,4 +555,38 @@ export interface GetServerUrlResponse {
 
 export const getServerUrl = () => {
     return post<GetServerUrlResponse>('/admin/server-url', {});
+};
+
+// SSH 登录监控相关接口
+
+// 获取 SSH 登录监控配置
+export const getSSHLoginConfig = async (agentId: string) => {
+    const response = await get<SSHLoginConfig>(`/admin/agents/${agentId}/ssh-login/config`);
+    return response.data;
+};
+
+// 更新 SSH 登录监控配置
+export const updateSSHLoginConfig = async (agentId: string, data: UpdateSSHLoginConfigRequest) => {
+    await post<SSHLoginConfig>(`/admin/agents/${agentId}/ssh-login/config`, data);
+};
+
+// 获取 SSH 登录事件列表
+export const getSSHLoginEvents = async (agentId: string, params?: any) => {
+   const query = qs.stringify(params);
+    const response = await get<{ items: SSHLoginEvent[]; total: number }>(`/admin/agents/${agentId}/ssh-login/events?${query}`);
+    return response.data;
+};
+
+// 删除 SSH 登录事件
+export const deleteSSHLoginEvents = async (agentId: string) => {
+    await del(`/admin/agents/${agentId}/ssh-login/events`);
+};
+
+// 清理残留的探针指标数据
+export interface CleanupMetricsResponse {
+    message: string;
+}
+
+export const cleanupOrphanedAgentMetrics = async () => {
+    return post<CleanupMetricsResponse>('/admin/agents/cleanup-metrics', {});
 };

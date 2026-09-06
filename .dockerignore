@@ -14,9 +14,10 @@
 *~
 
 # 构建产物
-bin/agents/
-web/dist/
+# bin/agents/、web/dist/ 和 themes/ 不能忽略，运行时从本地文件加载
 web/node_modules/
+# CI 仅使用该 checkout 构建 themes/default，不应进入镜像上下文
+pika-default-theme
 
 # 数据目录
 data/

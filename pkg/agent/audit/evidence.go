@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dushixiang/pika/internal/protocol"
+	"github.com/pika-monitor/pika/internal/protocol"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/process"
 )

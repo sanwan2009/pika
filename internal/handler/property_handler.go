@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/service"
-	"github.com/labstack/echo/v4"
+	"github.com/go-orz/orz"
+	"github.com/labstack/echo/v5"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/service"
 	"go.uber.org/zap"
 )
 
@@ -26,15 +27,13 @@ func NewPropertyHandler(logger *zap.Logger, service *service.PropertyService, no
 }
 
 // GetProperty 获取属性（返回 JSON 值）
-func (h *PropertyHandler) GetProperty(c echo.Context) error {
+func (h *PropertyHandler) GetProperty(c *echo.Context) error {
 	id := c.Param("id")
 
 	property, err := h.service.Get(c.Request().Context(), id)
 	if err != nil {
 		h.logger.Error("获取属性失败", zap.String("id", id), zap.Error(err))
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取属性失败",
-		})
+		return orz.NewError(500, "获取属性失败")
 	}
 
 	// 解析 JSON 值
@@ -42,13 +41,11 @@ func (h *PropertyHandler) GetProperty(c echo.Context) error {
 	if property.Value != "" {
 		if err := json.Unmarshal([]byte(property.Value), &value); err != nil {
 			h.logger.Error("解析属性值失败", zap.String("id", id), zap.Error(err))
-			return c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "解析属性值失败",
-			})
+			return orz.NewError(500, "解析属性值失败")
 		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	return orz.Ok(c, map[string]interface{}{
 		"id":    property.ID,
 		"name":  property.Name,
 		"value": value,
@@ -56,7 +53,7 @@ func (h *PropertyHandler) GetProperty(c echo.Context) error {
 }
 
 // SetProperty 设置属性
-func (h *PropertyHandler) SetProperty(c echo.Context) error {
+func (h *PropertyHandler) SetProperty(c *echo.Context) error {
 	id := c.Param("id")
 
 	var req struct {
@@ -65,25 +62,37 @@ func (h *PropertyHandler) SetProperty(c echo.Context) error {
 	}
 
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "无效的请求参数",
-		})
+		return orz.NewError(400, "无效的请求参数")
+	}
+
+	// 特殊校验：系统配置
+	if id == service.PropertyIDSystemConfig {
+		// 将 map 转为 SystemConfig 结构体进行校验 (或者直接校验 map)
+		// 这里 req.Value 是 map[string]interface{}
+		if valMap, ok := req.Value.(map[string]interface{}); ok {
+			var nameZh, nameEn string
+			if v, ok := valMap["systemNameZh"].(string); ok {
+				nameZh = v
+			}
+			if v, ok := valMap["systemNameEn"].(string); ok {
+				nameEn = v
+			}
+
+			if nameZh == "" && nameEn == "" {
+				return orz.NewError(400, "系统名称（中文）和系统名称（英文）不能同时为空")
+			}
+		}
 	}
 
 	if err := h.service.Set(c.Request().Context(), id, req.Name, req.Value); err != nil {
 		h.logger.Error("设置属性失败", zap.String("id", id), zap.Error(err))
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "设置属性失败",
-		})
+		return orz.NewError(500, "设置属性失败")
 	}
-
-	return c.JSON(http.StatusOK, map[string]string{
-		"message": "设置成功",
-	})
+	return orz.Ok(c, orz.Map{})
 }
 
 // GetLogo 获取系统 Logo（公开访问，返回图片文件流）
-func (h *PropertyHandler) GetLogo(c echo.Context) error {
+func (h *PropertyHandler) GetLogo(c *echo.Context) error {
 	sysConfig, err := h.service.GetSystemConfig(c.Request().Context())
 	if err != nil {
 		// 如果配置不存在，返回 404
@@ -151,12 +160,10 @@ func (h *PropertyHandler) GetLogo(c echo.Context) error {
 }
 
 // TestNotificationChannel 测试通知渠道（从数据库读取配置）
-func (h *PropertyHandler) TestNotificationChannel(c echo.Context) error {
+func (h *PropertyHandler) TestNotificationChannel(c *echo.Context) error {
 	channelType := c.Param("type")
 	if channelType == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "缺少渠道类型参数",
-		})
+		return orz.NewError(400, "缺少渠道类型参数")
 	}
 
 	ctx := c.Request().Context()
@@ -164,9 +171,7 @@ func (h *PropertyHandler) TestNotificationChannel(c echo.Context) error {
 	channels, err := h.service.GetNotificationChannelConfigs(c.Request().Context())
 	if err != nil {
 		h.logger.Error("获取通知渠道配置失败", zap.Error(err))
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取通知渠道配置失败",
-		})
+		return orz.NewError(500, "获取通知渠道配置失败")
 	}
 
 	// 查找指定类型的渠道
@@ -179,15 +184,11 @@ func (h *PropertyHandler) TestNotificationChannel(c echo.Context) error {
 	}
 
 	if targetChannel == nil {
-		return c.JSON(http.StatusNotFound, map[string]string{
-			"error": "通知渠道不存在，请先配置",
-		})
+		return orz.NewError(404, "通知渠道不存在，请先配置")
 	}
 
 	if !targetChannel.Enabled {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "通知渠道未启用",
-		})
+		return orz.NewError(400, "通知渠道未启用")
 	}
 
 	// 发送测试消息（动态匹配通知渠道类型）
@@ -196,12 +197,8 @@ func (h *PropertyHandler) TestNotificationChannel(c echo.Context) error {
 
 	if sendErr != nil {
 		h.logger.Error("发送测试通知失败", zap.String("type", channelType), zap.Error(sendErr))
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "发送测试通知失败: " + sendErr.Error(),
-		})
+		return orz.NewError(500, "发送测试通知失败: "+sendErr.Error())
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{
-		"message": "测试通知已发送",
-	})
+	return orz.Ok(c, orz.Map{})
 }

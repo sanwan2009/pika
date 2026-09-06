@@ -6,14 +6,17 @@ import (
 	"os"
 	"time"
 
-	"github.com/dushixiang/pika/internal"
-	"github.com/dushixiang/pika/internal/config"
-	v0_0_13 "github.com/dushixiang/pika/internal/migrate/v0_0_13"
-	"github.com/dushixiang/pika/internal/vmclient"
 	"github.com/go-orz/orz"
+	"github.com/pika-monitor/pika/internal"
+	"github.com/pika-monitor/pika/internal/config"
+	v0_0_13 "github.com/pika-monitor/pika/internal/migrate/v0_0_13"
+	"github.com/pika-monitor/pika/internal/vmclient"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+
+	_ "github.com/go-orz/orz/drivers/postgres"
+	_ "github.com/go-orz/orz/drivers/sqlite"
 )
 
 var (

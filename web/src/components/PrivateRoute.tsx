@@ -15,7 +15,7 @@ const PrivateRoute = ({ children }: PrivateRouteProps) => {
 
     // 如果没有登录信息，重定向到登录页
     if (!token || !userInfo) {
-        return <Navigate to="/login" replace />;
+        return <Navigate to="/admin/login" replace />;
     }
 
     // 已登录，渲染子组件

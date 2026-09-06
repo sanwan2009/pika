@@ -1,29 +1,27 @@
 package internal
 
 import (
-	"bytes"
 	"context"
-	"html/template"
 	"log"
 	"net/http"
-	"strings"
+	"path/filepath"
 	"time"
 
-	"github.com/dushixiang/pika/internal/config"
-	"github.com/dushixiang/pika/internal/handler"
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/scheduler"
-	"github.com/dushixiang/pika/pkg/replace"
-	"github.com/dushixiang/pika/pkg/version"
-	"github.com/dushixiang/pika/web"
 	"github.com/google/uuid"
-	"github.com/spf13/afero/mem"
+	"github.com/pika-monitor/pika/internal/assets"
+	"github.com/pika-monitor/pika/internal/config"
+	"github.com/pika-monitor/pika/internal/handler"
+	"github.com/pika-monitor/pika/internal/migrate"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/scheduler"
+	"github.com/pika-monitor/pika/internal/service"
+	"github.com/pika-monitor/pika/pkg/version"
 
 	"github.com/go-errors/errors"
 	"github.com/go-orz/orz"
 	"github.com/go-playground/validator/v10"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
+	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -66,11 +64,24 @@ func setup(app *orz.App) error {
 		return err
 	}
 
+	// 自动化升级数据库
+	if err := migrate.AutoMigrate(app.Logger(), app.GetDatabase(), components.PropertyService); err != nil {
+		app.Logger().Warn("数据库自动升级失败", zap.Error(err))
+	}
+
 	// 初始化默认属性配置
 	ctx := context.Background()
+	if err := components.ApiKeyService.FillLegacyApiKeyType(ctx); err != nil {
+		app.Logger().Warn("回填旧版 API Key 类型失败", zap.Error(err))
+		// 不返回错误，ValidateApiKey 仍会兼容空类型旧密钥
+	}
 	if err := initDefaultProperties(ctx, components, app.Logger()); err != nil {
 		app.Logger().Error("初始化默认属性配置失败", zap.Error(err))
 		// 不返回错误，继续启动
+	}
+	// 不存在任何告警规则时，从全局告警配置生成一条默认规则（保证升级/新装后告警行为不变）
+	if err := components.AlertRuleService.SeedDefaultRule(ctx); err != nil {
+		app.Logger().Warn("初始化默认告警规则失败", zap.Error(err))
 	}
 	// 初始化探针的状态全部为离线
 	if err := components.AgentService.InitStatus(ctx); err != nil {
@@ -92,67 +103,28 @@ func setup(app *orz.App) error {
 
 	// 启动流量重置检查任务(每小时检查一次)
 	go startTrafficResetCheck(ctx, components, app.Logger())
+	// 启动机器到期提醒检查任务(每小时检查一次)
+	go startAgentExpireCheck(ctx, components, app.Logger())
 
 	// 启动 DDNS 定时任务
 	go components.DDNSService.Run(ctx)
+	// 启动公网 IP 采集定时任务
+	go components.PublicIPService.Run(ctx)
 
 	// 设置API
-	setupApi(app, components)
+	if err := setupApi(app, components); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func setupApi(app *orz.App, components *AppComponents) {
+func setupApi(app *orz.App, components *AppComponents) error {
 	logger := app.Logger()
 	e := app.GetEcho()
 
 	e.Use(middleware.Recover())
 	e.Use(ErrorHandler(logger))
-
-	indexTemplate, err := template.New("index").Parse(web.IndexHtml())
-	if err != nil {
-		logger.Fatal("failed to parse index.html", zap.Error(err))
-	}
-	// 静态文件服务
-	e.Use(middleware.StaticWithConfig(middleware.StaticConfig{
-		Skipper: func(c echo.Context) bool {
-			// 不处理接口
-			if strings.HasPrefix(c.Request().RequestURI, "/api") {
-				return true
-			}
-			// 不处理WebSocket
-			if strings.HasPrefix(c.Request().RequestURI, "/ws") {
-				return true
-			}
-			return false
-		},
-		Index:      "index.html",
-		HTML5:      true,
-		Browse:     false,
-		IgnoreBase: false,
-		Filesystem: replace.FS(http.FS(web.Assets()), func(name string, file http.File) (http.File, error) {
-			if name == "index.html" {
-				fileData := mem.CreateFile(name)
-				fileHandle := mem.NewFileHandle(fileData)
-
-				systemConfig, err := components.PropertyService.GetSystemConfig(context.Background())
-				if err != nil {
-					return file, nil
-				}
-
-				var buf bytes.Buffer
-				err = indexTemplate.Execute(&buf, systemConfig)
-				if err != nil {
-					return file, err
-				}
-				if _, err := fileHandle.Write(buf.Bytes()); err != nil {
-					return nil, err
-				}
-				return fileHandle, nil
-			}
-			return file, nil
-		}),
-	}))
 
 	customValidator := CustomValidator{Validator: validator.New()}
 	if err := customValidator.TransInit(); err != nil {
@@ -168,6 +140,7 @@ func setupApi(app *orz.App, components *AppComponents) {
 		publicApi.GET("/auth/config", components.AccountHandler.GetAuthConfig)
 		publicApi.GET("/auth/oidc/url", components.AccountHandler.GetOIDCAuthURL)
 		publicApi.GET("/auth/github/url", components.AccountHandler.GetGitHubAuthURL)
+		publicApi.GET("/config", components.WebHandler.PublicConfig)
 
 		// Agent 版本和下载（完全公开，无需任何认证）
 		publicApi.GET("/agent/version", components.AgentHandler.GetAgentVersion)
@@ -186,10 +159,10 @@ func setupApi(app *orz.App, components *AppComponents) {
 		publicApiWithOptionalAuth.GET("/agents/:id/metrics", components.AgentHandler.GetMetrics)
 		publicApiWithOptionalAuth.GET("/agents/:id/metrics/latest", components.AgentHandler.GetLatestMetrics)
 		publicApiWithOptionalAuth.GET("/agents/:id/network-interfaces", components.AgentHandler.GetAvailableNetworkInterfaces)
-		publicApiWithOptionalAuth.GET("/agents/:id/traffic", components.AgentHandler.GetTrafficStats)
 
 		// 监控统计数据（公开访问，支持可选认证）- 用于公共展示页面
 		publicApiWithOptionalAuth.GET("/monitors", components.MonitorHandler.GetMonitors)
+		publicApiWithOptionalAuth.GET("/monitors/sparklines", components.MonitorHandler.GetSparklines)
 		publicApiWithOptionalAuth.GET("/monitors/:id/stats", components.MonitorHandler.GetStatsByID)
 		publicApiWithOptionalAuth.GET("/monitors/:id/agents", components.MonitorHandler.GetAgentStatsByID)
 		publicApiWithOptionalAuth.GET("/monitors/:id/history", components.MonitorHandler.GetHistoryByID)
@@ -201,11 +174,11 @@ func setupApi(app *orz.App, components *AppComponents) {
 	// WebSocket 路由（探针连接）
 	e.GET("/ws/agent", components.AgentHandler.HandleWebSocket)
 
-	// 管理员 API 路由（需要认证）
+	// 管理员 API 路由（需要认证，支持 JWT Token 或 API Key）
 	adminApi := e.Group("/api/admin")
-	adminApi.Use(JWTAuthMiddleware(components.AccountHandler))
+	adminApi.Use(UnifiedAuthMiddleware(components.AccountHandler, components.ApiKeyService))
 	{
-		adminApi.GET("/version", func(c echo.Context) error {
+		adminApi.GET("/version", func(c *echo.Context) error {
 			return c.JSON(http.StatusOK, orz.Map{
 				"version":      version.GetVersion(),
 				"agentVersion": version.GetAgentVersion(),
@@ -218,7 +191,9 @@ func setupApi(app *orz.App, components *AppComponents) {
 		// API密钥管理
 		adminApi.GET("/api-keys", components.ApiKeyHandler.Paging)
 		adminApi.POST("/api-keys", components.ApiKeyHandler.Create)
+		adminApi.POST("/admin-api-keys", components.ApiKeyHandler.CreateAdmin)
 		adminApi.GET("/api-keys/:id", components.ApiKeyHandler.Get)
+		adminApi.GET("/api-keys/:id/raw", components.ApiKeyHandler.GetRaw)
 		adminApi.PUT("/api-keys/:id", components.ApiKeyHandler.Update)
 		adminApi.DELETE("/api-keys/:id", components.ApiKeyHandler.Delete)
 		adminApi.POST("/api-keys/:id/enable", components.ApiKeyHandler.Enable)
@@ -229,13 +204,20 @@ func setupApi(app *orz.App, components *AppComponents) {
 		adminApi.GET("/agents", components.AgentHandler.Paging)
 		adminApi.GET("/agents/statistics", components.AgentHandler.GetStatistics)
 		adminApi.GET("/agents/tags", components.AgentHandler.GetTags)
+		adminApi.PUT("/agents/order", components.AgentHandler.UpdateOrder)
 		adminApi.GET("/agents/:id", components.AgentHandler.GetForAdmin)
+		adminApi.GET("/agents/:id/metrics/latest", components.AgentHandler.GetAdminLatestMetrics)
 		adminApi.PUT("/agents/:id", components.AgentHandler.UpdateInfo)
+		adminApi.POST("/agents/:id/enable", components.AgentHandler.Enable)
+		adminApi.POST("/agents/:id/disable", components.AgentHandler.Disable)
 		adminApi.POST("/agents/batch/tags", components.AgentHandler.BatchUpdateTags)
+		adminApi.POST("/agents/batch/visibility", components.AgentHandler.BatchUpdateVisibility)
 		adminApi.DELETE("/agents/:id", components.AgentHandler.Delete)
+		adminApi.POST("/agents/cleanup-metrics", components.AgentHandler.CleanupOrphanedAgentMetrics) // 清理残留指标数据
 		adminApi.POST("/agents/:id/command", components.AgentHandler.SendCommand)
 
 		// 流量管理（管理员访问）
+		adminApi.GET("/agents/:id/traffic", components.AgentHandler.GetTrafficStats)
 		adminApi.PUT("/agents/:id/traffic-config", components.AgentHandler.UpdateTrafficConfig)
 		adminApi.POST("/agents/:id/traffic-reset", components.AgentHandler.ResetAgentTraffic)
 
@@ -244,10 +226,16 @@ func setupApi(app *orz.App, components *AppComponents) {
 		adminApi.GET("/agents/:id/audit/results", components.AgentHandler.ListAuditResults)
 
 		// 防篡改管理（管理员功能）
-		adminApi.GET("/agents/:id/tamper/config", components.TamperHandler.GetTamperConfig)
-		adminApi.PUT("/agents/:id/tamper/config", components.TamperHandler.UpdateTamperConfig)
-		adminApi.GET("/agents/:id/tamper/events", components.TamperHandler.GetTamperEvents)
-		adminApi.GET("/agents/:id/tamper/alerts", components.TamperHandler.GetTamperAlerts)
+		adminApi.GET("/agents/:id/tamper/config", components.TamperHandler.GetConfig)
+		adminApi.PUT("/agents/:id/tamper/config", components.TamperHandler.UpdateConfig)
+		adminApi.GET("/agents/:id/tamper/events", components.TamperHandler.ListEvents)
+		adminApi.DELETE("/agents/:id/tamper/events", components.TamperHandler.DeleteEvents)
+
+		// SSH 登录监控管理（管理员功能）
+		adminApi.GET("/agents/:id/ssh-login/config", components.SSHLoginHandler.GetConfig)
+		adminApi.POST("/agents/:id/ssh-login/config", components.SSHLoginHandler.UpdateConfig)
+		adminApi.GET("/agents/:id/ssh-login/events", components.SSHLoginHandler.ListEvents)
+		adminApi.DELETE("/agents/:id/ssh-login/events", components.SSHLoginHandler.DeleteEvents)
 
 		// 通用属性管理
 		adminApi.GET("/properties/:id", components.PropertyHandler.GetProperty)
@@ -259,6 +247,14 @@ func setupApi(app *orz.App, components *AppComponents) {
 		// 告警记录查询
 		adminApi.GET("/alert-records", components.AlertHandler.ListAlertRecords)
 		adminApi.DELETE("/alert-records", components.AlertHandler.ClearAlertRecords)
+
+		// 告警规则管理
+		adminApi.GET("/alert-rules", components.AlertRuleHandler.List)
+		adminApi.POST("/alert-rules", components.AlertRuleHandler.Create)
+		adminApi.PUT("/alert-rules/:id", components.AlertRuleHandler.Update)
+		adminApi.DELETE("/alert-rules/:id", components.AlertRuleHandler.Delete)
+		adminApi.POST("/alert-rules/:id/enable", components.AlertRuleHandler.Enable)
+		adminApi.POST("/alert-rules/:id/disable", components.AlertRuleHandler.Disable)
 
 		// 服务监控配置
 		adminApi.GET("/monitors", components.MonitorHandler.List)
@@ -281,6 +277,14 @@ func setupApi(app *orz.App, components *AppComponents) {
 		adminApi.POST("/ddns/:id/enable", components.DDNSHandler.Enable)
 		adminApi.POST("/ddns/:id/disable", components.DDNSHandler.Disable)
 		adminApi.GET("/ddns/:id/records", components.DDNSHandler.GetRecords)
+		adminApi.POST("/ddns/:id/trigger", components.DDNSHandler.TriggerUpdate)
+
+		// 可安装主题管理
+		adminApi.GET("/themes", components.ThemeHandler.List)
+		adminApi.POST("/themes/upload", components.ThemeHandler.Upload)
+		adminApi.PUT("/themes/:id/activate", components.ThemeHandler.Activate)
+		adminApi.DELETE("/themes/:id", components.ThemeHandler.Delete)
+		adminApi.GET("/themes/:id/preview", components.ThemeHandler.Preview)
 	}
 
 	// OIDC 认证路由（如果启用）
@@ -288,24 +292,30 @@ func setupApi(app *orz.App, components *AppComponents) {
 
 	// GitHub 认证路由（如果启用）
 	publicApi.POST("/auth/github/callback", components.AccountHandler.GitHubLogin)
+
+	// 管理前端从 web/dist 由 Echo 直接加载；活动公开主题由主题服务选择独立目录。
+	e.Static("/admin/assets/", filepath.Join(assets.WebDir(), "assets"), handler.ImmutableStaticHeaders)
+	e.GET("/t/*", components.WebHandler.ServeThemeAsset)
+	e.GET("/*", components.WebHandler.ServeSPA)
+
+	return nil
 }
 
 func autoMigrate(database *gorm.DB) error {
 	// 自动迁移数据库表
 	return database.AutoMigrate(
-		&models.Agent{},               // 探针
-		&models.ApiKey{},              // ApiKey
-		&models.HostMetric{},          // 保留主机静态信息表
-		&models.AuditResult{},         // 审计历史
-		&models.Property{},            // 系统属性
-		&models.AlertRecord{},         // 告警记录
-		&models.AlertState{},          // 告警状态
-		&models.MonitorTask{},         // 服务监控
-		&models.TamperProtectConfig{}, // 防篡改配置
-		&models.TamperEvent{},         // 防篡改事件
-		&models.TamperAlert{},         // 防篡改告警
-		&models.DDNSConfig{},          // DDNS 配置
-		&models.DDNSRecord{},          // DDNS 记录
+		&models.Agent{},         // 探针
+		&models.ApiKey{},        // ApiKey
+		&models.AuditResult{},   // 审计历史
+		&models.Property{},      // 系统属性
+		&models.AlertRecord{},   // 告警记录
+		&models.AlertState{},    // 告警状态
+		&models.AlertRule{},     // 告警规则
+		&models.MonitorTask{},   // 服务监控
+		&models.TamperEvent{},   // 防篡改事件
+		&models.DDNSConfig{},    // DDNS 配置
+		&models.DDNSRecord{},    // DDNS 记录
+		&models.SSHLoginEvent{}, // SSH 登录事件
 	)
 }
 
@@ -317,7 +327,7 @@ func initDefaultProperties(ctx context.Context, components *AppComponents, logge
 
 func ErrorHandler(logger *zap.Logger) func(next echo.HandlerFunc) echo.HandlerFunc {
 	var a = func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			if err := next(c); err != nil {
 				var he *echo.HTTPError
 				if errors.As(err, &he) {
@@ -427,9 +437,34 @@ func startTrafficResetCheck(ctx context.Context, components *AppComponents, logg
 			logger.Info("流量重置检查任务已停止")
 			return
 		case <-ticker.C:
-			if err := components.AgentService.CheckAndResetTraffic(ctx); err != nil {
+			if err := components.TrafficService.CheckAndResetTraffic(ctx); err != nil {
 				logger.Error("流量重置检查失败", zap.Error(err))
 			}
+		}
+	}
+}
+
+// startAgentExpireCheck 启动机器到期提醒定时任务
+func startAgentExpireCheck(ctx context.Context, components *AppComponents, logger *zap.Logger) {
+	logger.Info("启动机器到期提醒检查任务")
+
+	ticker := time.NewTicker(1 * time.Hour) // 每小时检查一次
+	defer ticker.Stop()
+
+	check := func() {
+		if err := components.AlertService.CheckAgentExpireAlerts(ctx); err != nil {
+			logger.Error("机器到期提醒检查失败", zap.Error(err))
+		}
+	}
+
+	check()
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("机器到期提醒检查任务已停止")
+			return
+		case <-ticker.C:
+			check()
 		}
 	}
 }
@@ -437,7 +472,7 @@ func startTrafficResetCheck(ctx context.Context, components *AppComponents, logg
 // JWTAuthMiddleware JWT 认证中间件（必须登录）
 func JWTAuthMiddleware(accountHandler *handler.AccountHandler) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			// 从 Authorization header 获取 token
 			authHeader := c.Request().Header.Get("Authorization")
 			if authHeader == "" {
@@ -471,7 +506,7 @@ func JWTAuthMiddleware(accountHandler *handler.AccountHandler) echo.MiddlewareFu
 // OptionalJWTAuthMiddleware 可选 JWT 认证中间件（尝试解析 token，但不强制要求）
 func OptionalJWTAuthMiddleware(accountHandler *handler.AccountHandler) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
+		return func(c *echo.Context) error {
 			// 从 Authorization header 获取 token
 			authHeader := c.Request().Header.Get("Authorization")
 			if authHeader != "" {
@@ -498,3 +533,64 @@ func OptionalJWTAuthMiddleware(accountHandler *handler.AccountHandler) echo.Midd
 }
 
 // APIKeyAuthMiddleware 使用 API Key 进行认证
+func APIKeyAuthMiddleware(apiKeyService *service.ApiKeyService) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			authHeader := c.Request().Header.Get("Authorization")
+			if authHeader == "" {
+				return echo.NewHTTPError(http.StatusUnauthorized, "未提供认证令牌")
+			}
+			const bearerPrefix = "Bearer "
+			if len(authHeader) < len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
+				return echo.NewHTTPError(http.StatusUnauthorized, "认证令牌格式错误")
+			}
+			key := authHeader[len(bearerPrefix):]
+			apiKey, err := apiKeyService.ValidateApiKey(c.Request().Context(), key, "admin")
+			if err != nil {
+				return echo.NewHTTPError(http.StatusUnauthorized, "API Key 无效")
+			}
+			c.Set("userID", apiKey.CreatedBy)
+			c.Set("username", apiKey.CreatedBy)
+			c.Set("authenticated", true)
+			return next(c)
+		}
+	}
+}
+
+// UnifiedAuthMiddleware 统一认证中间件：优先尝试 JWT Token，失败后尝试 API Key
+func UnifiedAuthMiddleware(accountHandler *handler.AccountHandler, apiKeyService *service.ApiKeyService) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			authHeader := c.Request().Header.Get("Authorization")
+			if authHeader == "" {
+				return echo.NewHTTPError(http.StatusUnauthorized, "未提供认证令牌")
+			}
+			const bearerPrefix = "Bearer "
+			if len(authHeader) < len(bearerPrefix) || authHeader[:len(bearerPrefix)] != bearerPrefix {
+				return echo.NewHTTPError(http.StatusUnauthorized, "认证令牌格式错误")
+			}
+			token := authHeader[len(bearerPrefix):]
+
+			// 先尝试 JWT Token
+			claims, err := accountHandler.ValidateToken(token)
+			if err == nil {
+				c.Set("userID", claims.UserID)
+				c.Set("username", claims.Username)
+				c.Set("authType", "jwt")
+				c.Set("authenticated", true)
+				return next(c)
+			}
+
+			// 再尝试 API Key（仅 admin 类型可用于管理接口）
+			apiKey, err := apiKeyService.ValidateApiKey(c.Request().Context(), token, "admin")
+			if err != nil {
+				return echo.NewHTTPError(http.StatusUnauthorized, "认证令牌无效")
+			}
+			c.Set("userID", apiKey.CreatedBy)
+			c.Set("username", apiKey.CreatedBy)
+			c.Set("authType", "api_key")
+			c.Set("authenticated", true)
+			return next(c)
+		}
+	}
+}

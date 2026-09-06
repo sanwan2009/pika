@@ -2,41 +2,54 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 # Agent 版本号基于 pkg/agent/ 目录的最后修改提交生成
-# 格式：agent-{最近修改 pkg/agent 的提交短hash}-{提交数量}
-AGENT_VERSION ?= $(shell \
-	LAST_COMMIT=$$(git log -1 --format=%h -- pkg/agent 2>/dev/null || echo "dev"); \
-	COMMIT_COUNT=$$(git rev-list --count HEAD -- pkg/agent 2>/dev/null || echo "0"); \
-	if [ "$$LAST_COMMIT" = "dev" ]; then \
-		echo "dev"; \
-	else \
-		echo "$$LAST_COMMIT-$$COMMIT_COUNT"; \
-	fi \
-)
+# 格式：{最近修改 pkg/agent 的提交短hash}
+AGENT_VERSION ?= $(shell git log -1 --format=%h -- pkg/agent 2>/dev/null || echo "dev")
 
 GIT_REVISION=$(shell git rev-parse HEAD)
 GO_VERSION=$(shell go version)
 BUILD_TIME=$(shell date +%Y-%m-%d_%H:%M:%S)
 
+# UPX 默认使用快速压缩。可通过 make UPX_FLAGS=... 覆盖。
+UPX_FLAGS ?=
+
 # Go 构建参数
-LDFLAGS=-s -w -X 'github.com/dushixiang/pika/pkg/version.Version=$(VERSION)' -X 'github.com/dushixiang/pika/pkg/version.AgentVersion=$(AGENT_VERSION)'
-AGENT_LDFLAGS=-s -w -X 'github.com/dushixiang/pika/pkg/version.Version=$(VERSION)' -X 'github.com/dushixiang/pika/pkg/version.AgentVersion=$(AGENT_VERSION)'
+LDFLAGS=-s -w -X 'github.com/pika-monitor/pika/pkg/version.Version=$(VERSION)' -X 'github.com/pika-monitor/pika/pkg/version.AgentVersion=$(AGENT_VERSION)'
+AGENT_LDFLAGS=-s -w -X 'github.com/pika-monitor/pika/pkg/version.Version=$(VERSION)' -X 'github.com/pika-monitor/pika/pkg/version.AgentVersion=$(AGENT_VERSION)'
 GOFLAGS=CGO_ENABLED=0
 
-# 构建前端
+# 默认主题已拆分到独立仓库。本地默认使用同级目录，CI 会显式传入 checkout 目录。
+DEFAULT_THEME_DIR ?= ../pika-default-theme
+DEFAULT_THEME_OUTPUT_DIR ?= themes/default
+
+.PHONY: build-web build-default-theme
+
+# 构建官方管理前端和独立的默认主题，并组装到统一发布目录。
 build-web:
-	cd web && yarn && yarn build
+	npm ci --prefix web
+	npm run build --prefix web
+	$(MAKE) build-default-theme
+
+build-default-theme:
+	test -f "$(DEFAULT_THEME_DIR)/package-lock.json"
+	test -f "$(DEFAULT_THEME_DIR)/pika-theme.json"
+	npm ci --prefix "$(DEFAULT_THEME_DIR)"
+	npm run build --prefix "$(DEFAULT_THEME_DIR)"
+	rm -rf "$(DEFAULT_THEME_OUTPUT_DIR)"
+	mkdir -p "$(DEFAULT_THEME_OUTPUT_DIR)"
+	cp "$(DEFAULT_THEME_DIR)/pika-theme.json" "$(DEFAULT_THEME_OUTPUT_DIR)/pika-theme.json"
+	cp -R "$(DEFAULT_THEME_DIR)/dist" "$(DEFAULT_THEME_OUTPUT_DIR)/dist"
 
 # 构建服务端（开发）
 build-server:
-	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o bin/pika-linux-amd64 cmd/serv/main.go
-	upx bin/pika-linux-amd64
+	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/pika-linux-amd64 cmd/serv/main.go
+	upx $(UPX_FLAGS) bin/pika-linux-amd64
 
 build-servers:
-	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -ldflags="$(LDFLAGS)" -o bin/pika-linux-amd64 cmd/serv/main.go
-	$(GOFLAGS) GOOS=linux GOARCH=arm64 go build -ldflags="$(LDFLAGS)" -o bin/pika-linux-arm64 cmd/serv/main.go
+	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/pika-linux-amd64 cmd/serv/main.go
+	$(GOFLAGS) GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/pika-linux-arm64 cmd/serv/main.go
 
-	upx bin/pika-linux-amd64
-	upx bin/pika-linux-arm64
+	upx $(UPX_FLAGS) bin/pika-linux-amd64
+	upx $(UPX_FLAGS) bin/pika-linux-arm64
 
 # 构建所有平台的 Agent
 build-agents:
@@ -46,37 +59,38 @@ build-agents:
 	@mkdir -p bin/agents
 
 	# Linux
-	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-amd64 cmd/agent/*.go
-	$(GOFLAGS) GOOS=linux GOARCH=arm64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-arm64 cmd/agent/*.go
-	$(GOFLAGS) GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-armv7 cmd/agent/*.go
-	$(GOFLAGS) GOOS=linux GOARCH=loong64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-loong64 cmd/agent/*.go
+	$(GOFLAGS) GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-amd64 ./cmd/agent
+	$(GOFLAGS) GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-arm64 ./cmd/agent
+	$(GOFLAGS) GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-armv7 ./cmd/agent
+	$(GOFLAGS) GOOS=linux GOARCH=loong64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-linux-loong64 ./cmd/agent
 
 	# macOS
-	$(GOFLAGS) GOOS=darwin GOARCH=amd64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-darwin-amd64 cmd/agent/*.go
-	$(GOFLAGS) GOOS=darwin GOARCH=arm64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-darwin-arm64 cmd/agent/*.go
+	$(GOFLAGS) GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-darwin-amd64 ./cmd/agent
+	$(GOFLAGS) GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-darwin-arm64 ./cmd/agent
 
 	# Windows
-	$(GOFLAGS) GOOS=windows GOARCH=amd64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-windows-amd64.exe cmd/agent/*.go
-	$(GOFLAGS) GOOS=windows GOARCH=arm64 go build -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-windows-arm64.exe cmd/agent/*.go
+	$(GOFLAGS) GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-windows-amd64.exe ./cmd/agent
+	$(GOFLAGS) GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="$(AGENT_LDFLAGS)" -o bin/agents/pika-agent-windows-arm64.exe ./cmd/agent
 
 	@echo "All agents built successfully!"
 	@echo "Compressing agents with UPX..."
-	@upx bin/agents/pika-agent-linux-amd64
-	@upx bin/agents/pika-agent-linux-arm64
-	@upx bin/agents/pika-agent-linux-armv7
+	@upx $(UPX_FLAGS) bin/agents/pika-agent-linux-amd64
+	@upx $(UPX_FLAGS) bin/agents/pika-agent-linux-arm64
+	@upx $(UPX_FLAGS) bin/agents/pika-agent-linux-armv7
 	@echo "All agents compressed successfully!"
 	@ls -lh bin/agents/
 
-# 构建所有
+# 构建所有（release版本）
 build-release:
-	make build-web
-	make build-agents
-	make build-servers
+	$(MAKE) build-web
+	$(MAKE) build-agents
+	$(MAKE) build-servers
 
 # 清理编译产物
 clean:
 	rm -rf bin/*
 	rm -rf web/dist
+	rm -rf themes/default
 
 # 运行测试
 test:
@@ -85,7 +99,6 @@ test:
 # 代码格式化
 fmt:
 	go fmt ./...
-	cd web && yarn format
 
 # 代码检查
 lint:

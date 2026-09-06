@@ -20,17 +20,15 @@ agent:
   # Agent 名称（可选，默认使用主机名）
   # 用于在服务端区分不同的探针
   name: ""
+  log_level: "info" # 日志级别: debug, info, warn, error
+  log_file: "agent.log" # 日志文件名（可选，默认为空，不输出到文件）
+  log_max_size: 100 # 日志文件最大大小（MB），默认 100MB
+  log_max_backups: 3 # 日志文件最大备份数，默认 3 个备份文件
+  log_max_age: 28 # 日志文件最大保存天数，默认 28 天
+  log_compress: true # 是否压缩旧日志文件，默认 true
 
 # 采集器配置
 collector:
-  # 数据采集间隔（秒）
-  # 建议: 5-60 秒，太短会增加服务器负载
-  interval: 5
-
-  # 心跳间隔（秒）
-  # 建议: 30-120 秒
-  heartbeat_interval: 30
-
   # 网络采集包含的网卡列表（白名单，支持正则表达式）
   # 如果配置了此项，则只采集匹配的网卡，忽略 network_exclude
   # 例如: ["^eth0$", "^en0$", "^ens.*"]
@@ -45,6 +43,7 @@ collector:
     - "^docker.*"      # 排除所有 docker 开头的接口
     - "^veth.*"        # 排除所有 veth 开头的虚拟接口
     - "^br-.*"         # 排除所有 br- 开头的网桥接口
+    - "^tap.*"         # 排除所有 tap 开头的接口（PVE/KVM 虚拟机）
 
   # 磁盘采集包含的挂载点列表（白名单）
   # 如果为空，默认采集系统主分区（Linux/macOS: "/"，Windows: "C:\"）

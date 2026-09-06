@@ -1,80 +1,58 @@
 import {useEffect, useState} from 'react';
 import {useNavigate, useParams, useSearchParams} from 'react-router-dom';
-import type {MenuProps, TabsProps} from 'antd';
-import {Alert, App, Button, Card, Descriptions, Dropdown, Space, Spin, Tabs, Tag} from 'antd';
-import {Activity, ArrowLeft, Clock, FileWarning, RefreshCw, Shield, Terminal} from 'lucide-react';
-import TamperProtection from './TamperProtection.tsx';
-import {getAgentForAdmin, getAuditResult, sendAuditCommand, type VPSAuditResult} from '@/api/agent.ts';
-import type {Agent} from '@/types';
-import dayjs from 'dayjs';
-import {getErrorMessage} from '@/lib/utils';
-import AuditResultView from './AuditResultView';
+import type {TabsProps} from 'antd';
+import {Alert, Spin, Tabs, Tag} from 'antd';
+import {Activity, ArrowLeft, Edit, FileWarning, Lock, Shield, TrendingUp} from 'lucide-react';
+import {useQuery, useQueryClient} from '@tanstack/react-query';
+import {getAgentForAdmin, getTags} from '@/api/agent.ts';
+import AgentBasicInfo from './AgentBasicInfo';
+import AgentAudit from './AgentAudit';
+import AgentEditModal from './AgentEditModal';
+import TamperProtection from './TamperProtection';
+import SSHLoginMonitor from './SSHLoginMonitor';
+import TrafficStats from './TrafficStats';
+import {PageHeader} from '@/components/PageHeader';
+import {PagePanel} from '@/components/PagePanel';
 
 const AgentDetail = () => {
     const {id} = useParams<{ id: string }>();
     const navigate = useNavigate();
+    const queryClient = useQueryClient();
     const [searchParams, setSearchParams] = useSearchParams();
-    const {message: messageApi} = App.useApp();
-    const [loading, setLoading] = useState(false);
-    const [agent, setAgent] = useState<Agent | null>(null);
-    const [auditResult, setAuditResult] = useState<VPSAuditResult | null>(null);
-    const [auditing, setAuditing] = useState(false);
     const [activeTab, setActiveTab] = useState<string>(searchParams.get('tab') || 'info');
+    const [editModalVisible, setEditModalVisible] = useState(false);
 
-    const fetchData = async () => {
-        if (!id) return;
+    // 获取探针基本信息（用于显示头部卡片）
+    const {data: agent, isLoading} = useQuery({
+        queryKey: ['admin', 'agent', id],
+        queryFn: async () => {
+            if (!id) throw new Error('Agent ID is required');
+            const response = await getAgentForAdmin(id);
+            return response.data;
+        },
+        enabled: !!id,
+    });
 
-        setLoading(true);
-        try {
-            const [agentRes, auditRes] = await Promise.all([
-                getAgentForAdmin(id),
-                getAuditResult(id).catch(() => ({data: null})),
-            ]);
-
-            setAgent(agentRes.data);
-            setAuditResult(auditRes.data);
-        } catch (error: any) {
-            messageApi.error(error.response?.data?.message || '获取探针信息失败');
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleStartAudit = async () => {
-        if (!id) return;
-
-        // 检查是否为 Linux 系统
-        if (!agent?.os.toLowerCase().includes('linux')) {
-            messageApi.warning('安全审计功能仅支持 Linux 系统');
-            return;
-        }
-
-        setAuditing(true);
-        try {
-            await sendAuditCommand(id);
-            messageApi.success('安全审计已启动,请稍后查看结果');
-
-            // 10秒后刷新结果 (给Server端分析时间)
-            setTimeout(() => {
-                fetchData();
-            }, 10000);
-        } catch (error: unknown) {
-            messageApi.error(getErrorMessage(error, '启动审计失败'));
-        } finally {
-            setAuditing(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchData();
-    }, [id]);
+    // 获取标签列表（编辑探针弹窗使用）
+    const {data: tags = []} = useQuery({
+        queryKey: ['admin', 'agents', 'tags'],
+        queryFn: async () => {
+            const response = await getTags();
+            return response.data.tags || [];
+        },
+    });
 
     useEffect(() => {
         // 同步 activeTab 到 URL
-        setSearchParams({tab: activeTab});
-    }, [activeTab]);
+        const nextParams = new URLSearchParams(searchParams);
+        if (nextParams.get('tab') === activeTab) {
+            return;
+        }
+        nextParams.set('tab', activeTab);
+        setSearchParams(nextParams);
+    }, [activeTab, searchParams, setSearchParams]);
 
-    if (loading && !agent) {
+    if (isLoading) {
         return (
             <div className="text-center py-24">
                 <Spin/>
@@ -82,25 +60,18 @@ const AgentDetail = () => {
         );
     }
 
-    // 命令菜单配置
-    const commandMenuItems: MenuProps['items'] = [
-        {
-            key: 'audit',
-            icon: <Shield size={16}/>,
-            label: '安全审计',
-            onClick: handleStartAudit,
-        },
-        {
-            type: 'divider',
-        },
-        {
-            key: 'refresh',
-            icon: <RefreshCw size={16}/>,
-            label: '刷新数据',
-            onClick: fetchData,
-        },
-    ];
-
+    if (!agent || !id) {
+        return (
+            <div className="text-center py-24">
+                <Alert
+                    title="未找到探针"
+                    description="该探针不存在或已被删除"
+                    type="error"
+                    showIcon
+                />
+            </div>
+        );
+    }
 
     // Tab 项配置
     const tabItems: TabsProps['items'] = [
@@ -112,55 +83,17 @@ const AgentDetail = () => {
                     <div>基本信息</div>
                 </div>
             ),
-            children: (
-                <Descriptions column={{xs: 1, sm: 2}} bordered>
-                    <Descriptions.Item label="探针名称">{agent?.name}</Descriptions.Item>
-                    <Descriptions.Item label="探针ID">{agent?.id}</Descriptions.Item>
-                    <Descriptions.Item label="主机名">{agent?.hostname}</Descriptions.Item>
-                    <Descriptions.Item label="IP地址">{agent?.ip}</Descriptions.Item>
-                    <Descriptions.Item label="操作系统">
-                        <Tag color="blue">{agent?.os}</Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="系统架构">
-                        <Tag>{agent?.arch}</Tag>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="到期时间">
-                        {agent?.expireTime ? (
-                            <div className="flex flex-col gap-1">
-                                <div>{new Date(agent.expireTime).toLocaleDateString('zh-CN')}</div>
-                                {(() => {
-                                    const expireDate = new Date(agent.expireTime);
-                                    const now = new Date();
-                                    const isExpired = expireDate < now;
-                                    const daysLeft = Math.ceil((expireDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-
-                                    if (isExpired) {
-                                        return <Tag color="red" bordered={false}>已过期</Tag>;
-                                    } else if (daysLeft <= 7) {
-                                        return <Tag color="orange" bordered={false}>{daysLeft}天后到期</Tag>;
-                                    } else if (daysLeft <= 30) {
-                                        return <Tag color="gold" bordered={false}>{daysLeft}天后到期</Tag>;
-                                    }
-                                    return null;
-                                })()}
-                            </div>
-                        ) : '-'}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="探针版本">{agent?.version}</Descriptions.Item>
-                    <Descriptions.Item label="最后活跃时间">
-                        <Space>
-                            <Clock size={14}/>
-                            {agent?.lastSeenAt && dayjs(agent.lastSeenAt).format('YYYY-MM-DD HH:mm:ss')}
-                        </Space>
-                    </Descriptions.Item>
-                    <Descriptions.Item label="创建时间">
-                        {agent?.createdAt && dayjs(agent.createdAt).format('YYYY-MM-DD HH:mm:ss')}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="更新时间">
-                        {agent?.updatedAt && dayjs(agent.updatedAt).format('YYYY-MM-DD HH:mm:ss')}
-                    </Descriptions.Item>
-                </Descriptions>
+            children: <AgentBasicInfo agentId={id}/>,
+        },
+        {
+            key: 'traffic',
+            label: (
+                <div className="flex items-center gap-2 text-sm">
+                    <TrendingUp size={16}/>
+                    <div>流量统计</div>
+                </div>
             ),
+            children: <TrafficStats agentId={id}/>,
         },
         {
             key: 'audit',
@@ -170,44 +103,7 @@ const AgentDetail = () => {
                     <div>安全审计</div>
                 </div>
             ),
-            children: (
-                <Space direction="vertical" style={{width: '100%'}}>
-                    {/* 非 Linux 系统提示 */}
-                    {agent && !agent.os.toLowerCase().includes('linux') && (
-                        <Alert
-                            message="功能限制"
-                            description="安全审计功能仅支持 Linux 系统。当前系统为 Windows 或其他系统，无法使用此功能。"
-                            type="warning"
-                            showIcon
-                        />
-                    )}
-
-                    {!auditResult ? (
-                        agent?.os.toLowerCase().includes('linux') ? (
-                            <Alert
-                                message="暂无审计结果"
-                                description={
-                                    <Space direction="vertical">
-                                        <span>该探针还没有进行过安全审计。点击右上角"下发命令"按钮，选择"安全审计"来执行首次审计。</span>
-                                        <Button
-                                            type="primary"
-                                            icon={<Shield size={16}/>}
-                                            onClick={handleStartAudit}
-                                            loading={auditing}
-                                        >
-                                            立即开始审计
-                                        </Button>
-                                    </Space>
-                                }
-                                type="info"
-                                showIcon
-                            />
-                        ) : null
-                    ) : (
-                        <AuditResultView result={auditResult}/>
-                    )}
-                </Space>
-            ),
+            children: <AgentAudit agentId={id}/>,
         },
         {
             key: 'tamper',
@@ -217,12 +113,31 @@ const AgentDetail = () => {
                     <div>防篡改保护</div>
                 </div>
             ),
-            children: agent?.os.toLowerCase().includes('linux') ? (
-                <TamperProtection agentId={agent.id}/>
+            children: agent.os.toLowerCase().includes('linux') ? (
+                <TamperProtection agentId={id}/>
             ) : (
                 <Alert
-                    message="功能限制"
+                    title="功能限制"
                     description="防篡改保护功能仅支持 Linux 系统。当前系统为 Windows 或其他系统，无法使用此功能。"
+                    type="warning"
+                    showIcon
+                />
+            ),
+        },
+        {
+            key: 'ssh-login',
+            label: (
+                <div className="flex items-center gap-2 text-sm">
+                    <Lock size={16}/>
+                    <div>SSH 登录监控</div>
+                </div>
+            ),
+            children: agent.os.toLowerCase().includes('linux') ? (
+                <SSHLoginMonitor agentId={id}/>
+            ) : (
+                <Alert
+                    title="功能限制"
+                    description="SSH 登录监控功能仅支持 Linux 系统。当前系统为 Windows 或其他系统，无法使用此功能。"
                     type="warning"
                     showIcon
                 />
@@ -231,62 +146,50 @@ const AgentDetail = () => {
     ];
 
     return (
-        <div className="space-y-4 lg:space-y-6">
-            {/* 页面头部 */}
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <Button
-                    icon={<ArrowLeft size={16}/>}
-                    onClick={() => navigate('/admin/agents')}
-                    size="middle"
-                >
-                    返回列表
-                </Button>
-
-                <Space size={8}>
-                    <Dropdown
-                        menu={{items: commandMenuItems}}
-                        placement="bottomRight"
-                        trigger={['click']}
-                    >
-                        <Button
-                            type="primary"
-                            icon={<Terminal size={16}/>}
-                            loading={auditing}
-                            size="middle"
+        <div className="space-y-4">
+            <PageHeader
+                title={
+                    <span className="flex flex-wrap items-center gap-2.5">
+                        {agent.name || agent.hostname}
+                        <button
+                            type="button"
+                            onClick={() => navigate('/admin/agents')}
+                            className="flex cursor-pointer items-center gap-1 border-0 bg-transparent p-0 text-xs font-normal text-[#646a73] transition-colors hover:text-[#1677ff] dark:text-[#9ba1ab] dark:hover:text-[#75adff]"
                         >
-                            <span className="hidden sm:inline">下发命令</span>
-                            <span className="sm:hidden">命令</span>
-                        </Button>
-                    </Dropdown>
-                </Space>
-            </div>
-
-            {/* 探针状态卡片 */}
-            <Card variant={'outlined'}>
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                    <div className="flex items-center gap-4">
-                        <Activity size={32} className="text-blue-500"/>
-                        <div>
-                            <h2 className="text-xl font-semibold m-0">{agent?.name || agent?.hostname}</h2>
-                            <Space className="mt-1">
-                                <span className="text-gray-500">{agent?.hostname}</span>
-                                {agent?.status === 1 ? (
-                                    <Tag color="success">在线</Tag>
-                                ) : (
-                                    <Tag color="error">离线</Tag>
-                                )}
-                            </Space>
-                        </div>
-                    </div>
-                </div>
-            </Card>
+                            <ArrowLeft size={12}/>
+                            <span>返回列表</span>
+                        </button>
+                    </span>
+                }
+                extra={agent.status === 1 ? <Tag color="success">在线</Tag> : <Tag color="error">离线</Tag>}
+                actions={[{
+                    key: 'edit',
+                    label: '编辑探针',
+                    type: 'primary',
+                    icon: <Edit size={16}/>,
+                    onClick: () => setEditModalVisible(true),
+                }]}
+            />
 
             {/* Tabs 内容 */}
-            <Tabs
-                activeKey={activeTab}
-                onChange={setActiveTab}
-                items={tabItems}
+            <PagePanel>
+                <Tabs
+                    activeKey={activeTab}
+                    onChange={setActiveTab}
+                    items={tabItems}
+                />
+            </PagePanel>
 
+            {/* 编辑探针模态框 */}
+            <AgentEditModal
+                open={editModalVisible}
+                agentId={id}
+                existingTags={tags}
+                onCancel={() => setEditModalVisible(false)}
+                onSuccess={() => {
+                    setEditModalVisible(false);
+                    queryClient.invalidateQueries({queryKey: ['admin', 'agent', id]});
+                }}
             />
         </div>
     );

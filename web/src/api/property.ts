@@ -79,6 +79,7 @@ export const testNotificationChannel = async (type: string): Promise<{ message: 
 // ==================== 系统配置 ====================
 
 const PROPERTY_ID_SYSTEM_CONFIG = 'system_config';
+const PROPERTY_ID_PUBLIC_IP_CONFIG = 'public_ip_config';
 
 export interface SystemConfig {
     systemNameEn: string;  // 英文名称
@@ -86,6 +87,23 @@ export interface SystemConfig {
     logoBase64: string;    // Logo 的 base64 编码
     icpCode: string;       // ICP 备案号
     defaultView: string;   // 默认视图 grid,list
+    customCSS: string;     // 自定义 CSS
+    customJS: string;      // 自定义 JS
+}
+
+export interface PublicIPConfig {
+    enabled: boolean;
+    intervalSeconds: number;
+    ipv4Scope: 'all' | 'agents' | 'tags' | 'custom'; // custom 为历史取值，等同 agents
+    ipv4AgentIds: string[];
+    ipv4Tags: string[];
+    ipv6Scope: 'all' | 'agents' | 'tags' | 'custom';
+    ipv6AgentIds: string[];
+    ipv6Tags: string[];
+    ipv4Enabled: boolean;
+    ipv6Enabled: boolean;
+    ipv4Apis: string[];
+    ipv6Apis: string[];
 }
 
 // 获取系统配置（管理后台使用）
@@ -98,9 +116,19 @@ export const saveSystemConfig = async (config: SystemConfig): Promise<void> => {
     return saveProperty(PROPERTY_ID_SYSTEM_CONFIG, '系统配置', config);
 };
 
-// ==================== 告警配置 ====================
+// 获取公网 IP 采集配置
+export const getPublicIPConfig = async (): Promise<PublicIPConfig> => {
+    return getProperty<PublicIPConfig>(PROPERTY_ID_PUBLIC_IP_CONFIG);
+};
 
-const PROPERTY_ID_ALERT_CONFIG = 'alert_config';
+// 保存公网 IP 采集配置
+export const savePublicIPConfig = async (config: PublicIPConfig): Promise<void> => {
+    return saveProperty(PROPERTY_ID_PUBLIC_IP_CONFIG, '公网 IP 采集配置', config);
+};
+
+// ==================== 告警配置 ====================
+// 告警行为已完全由告警规则（/admin/alert-rules）驱动，全局告警配置不再对外暴露读写接口。
+// AlertRules 类型供告警规则使用。
 
 // 告警规则
 export interface AlertRules {
@@ -124,20 +152,21 @@ export interface AlertRules {
     agentOfflineDuration: number;   // 探针离线持续时间（秒）
 }
 
-// 全局告警配置
-export interface AlertConfig {
-    enabled: boolean;  // 全局告警开关
-    maskIP: boolean;   // 是否在通知中打码 IP 地址
-    rules: AlertRules;
+// ==================== 探针安装配置 ====================
+
+const PROPERTY_ID_AGENT_INSTALL_CONFIG = 'agent_install_config';
+
+// 探针安装配置
+export interface AgentInstallConfig {
+    serverUrl: string;  // 服务端地址
 }
 
-// 获取告警配置
-export const getAlertConfig = async (): Promise<AlertConfig> => {
-    return getProperty<AlertConfig>(PROPERTY_ID_ALERT_CONFIG);
+// 获取探针安装配置
+export const getAgentInstallConfig = async (): Promise<AgentInstallConfig> => {
+    return getProperty<AgentInstallConfig>(PROPERTY_ID_AGENT_INSTALL_CONFIG);
 };
 
-// 保存告警配置
-export const saveAlertConfig = async (config: AlertConfig): Promise<void> => {
-    return saveProperty(PROPERTY_ID_ALERT_CONFIG, '告警配置', config);
+// 保存探针安装配置
+export const saveAgentInstallConfig = async (config: AgentInstallConfig): Promise<void> => {
+    return saveProperty(PROPERTY_ID_AGENT_INSTALL_CONFIG, '探针安装配置', config);
 };
-

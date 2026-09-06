@@ -5,8 +5,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/dushixiang/pika/internal/config"
 	"github.com/oschwald/geoip2-golang"
+	"github.com/pika-monitor/pika/internal/config"
 	"go.uber.org/zap"
 )
 

@@ -6,26 +6,48 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/repo"
-	"github.com/dushixiang/pika/web"
 	"github.com/go-orz/cache"
+	"github.com/pika-monitor/pika/internal/assets"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/repo"
+	"github.com/pika-monitor/pika/pkg/version"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
 const (
+	// PropertyIDSystemVersion 系统版本的固定 ID
+	PropertyIDSystemVersion = "version"
 	// PropertyIDNotificationChannels 通知渠道配置的固定 ID
 	PropertyIDNotificationChannels = "notification_channels"
 	// PropertyIDSystemConfig 系统配置的固定 ID
 	PropertyIDSystemConfig = "system_config"
-	// PropertyIDMetricsConfig 指标配置的固定 ID
-	PropertyIDMetricsConfig = "metrics_config"
+	// PropertyIDPublicIPConfig 公网 IP 采集配置的固定 ID
+	PropertyIDPublicIPConfig = "public_ip_config"
 	// PropertyIDAlertConfig 告警配置的固定 ID
 	PropertyIDAlertConfig = "alert_config"
 	// PropertyIDDNSProviders DNS 服务商配置的固定 ID
 	PropertyIDDNSProviders = "dns_providers"
+	// PropertyIDAgentInstallConfig 探针安装配置的固定 ID
+	PropertyIDAgentInstallConfig = "agent_install_config"
+	// PropertyIDAppearanceConfig 当前公开主题和默认明暗模式。
+	PropertyIDAppearanceConfig = "appearance_config"
 )
+
+var defaultPublicIPv4APIs = []string{
+	"https://myip.ipip.net",
+	"https://ddns.oray.com/checkip",
+	"https://ip.3322.net",
+	"https://4.ipw.cn",
+	"https://v4.yinghualuo.cn/bejson",
+}
+
+var defaultPublicIPv6APIs = []string{
+	"https://speed.neu6.edu.cn/getIP.php",
+	"https://v6.ident.me",
+	"https://6.ipw.cn",
+	"https://v6.yinghualuo.cn/bejson",
+}
 
 type PropertyService struct {
 	repo   *repo.PropertyRepo
@@ -117,17 +139,121 @@ func (s *PropertyService) GetSystemConfig(ctx context.Context) (*models.SystemCo
 	if err != nil {
 		return nil, fmt.Errorf("获取系统配置失败: %w", err)
 	}
+	// 设置系统版本
+	systemConfig.Version = version.Version
 	return &systemConfig, nil
+}
+
+func (s *PropertyService) GetAppearanceConfig(ctx context.Context) (*AppearanceConfig, error) {
+	var config AppearanceConfig
+	if err := s.GetValue(ctx, PropertyIDAppearanceConfig, &config); err != nil {
+		return nil, fmt.Errorf("获取外观配置失败: %w", err)
+	}
+	if config.ActiveTheme == "" {
+		config.ActiveTheme = "default"
+	}
+	if config.DefaultColorMode == "" {
+		config.DefaultColorMode = "system"
+	}
+	return &config, nil
+}
+
+func (s *PropertyService) SetAppearanceConfig(ctx context.Context, config AppearanceConfig) error {
+	return s.Set(ctx, PropertyIDAppearanceConfig, "外观配置", config)
+}
+
+// GetPublicIPConfig 获取公网 IP 采集配置
+func (s *PropertyService) GetPublicIPConfig(ctx context.Context) (*models.PublicIPConfig, error) {
+	var config models.PublicIPConfig
+	if err := s.GetValue(ctx, PropertyIDPublicIPConfig, &config); err != nil {
+		return nil, fmt.Errorf("获取公网 IP 采集配置失败: %w", err)
+	}
+	applyPublicIPConfigDefaults(&config)
+	return &config, nil
 }
 
 // GetAlertConfig 获取告警配置
 func (s *PropertyService) GetAlertConfig(ctx context.Context) (*models.AlertConfig, error) {
-	var config models.AlertConfig
-	err := s.GetValue(ctx, PropertyIDAlertConfig, &config)
+	property, err := s.Get(ctx, PropertyIDAlertConfig)
 	if err != nil {
 		return nil, fmt.Errorf("获取告警配置失败: %w", err)
 	}
+
+	var config models.AlertConfig
+	if property.Value != "" {
+		if err := json.Unmarshal([]byte(property.Value), &config); err != nil {
+			return nil, fmt.Errorf("解析告警配置失败: %w", err)
+		}
+	}
+
+	applyAlertNotificationDefaults(&config, property.Value)
+
 	return &config, nil
+}
+
+func applyAlertNotificationDefaults(config *models.AlertConfig, rawValue string) {
+	defaults := models.AlertNotifications{
+		TrafficEnabled:         true,
+		SSHLoginSuccessEnabled: true,
+		TamperEventEnabled:     true,
+	}
+
+	if rawValue == "" {
+		config.Notifications = defaults
+		return
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(rawValue), &raw); err != nil {
+		config.Notifications = defaults
+		return
+	}
+
+	notificationsRaw, ok := raw["notifications"]
+	if !ok || len(notificationsRaw) == 0 {
+		config.Notifications = defaults
+		return
+	}
+
+	var notificationsMap map[string]json.RawMessage
+	if err := json.Unmarshal(notificationsRaw, &notificationsMap); err != nil {
+		config.Notifications = defaults
+		return
+	}
+
+	if _, ok := notificationsMap["trafficEnabled"]; !ok {
+		config.Notifications.TrafficEnabled = true
+	}
+	if _, ok := notificationsMap["sshLoginSuccessEnabled"]; !ok {
+		config.Notifications.SSHLoginSuccessEnabled = true
+	}
+	if _, ok := notificationsMap["tamperEventEnabled"]; !ok {
+		config.Notifications.TamperEventEnabled = true
+	}
+}
+
+func applyPublicIPConfigDefaults(config *models.PublicIPConfig) {
+	if config.IntervalSeconds <= 0 {
+		config.IntervalSeconds = 300
+	}
+	if config.IPv4Scope == "" {
+		config.IPv4Scope = "all"
+	}
+	if config.IPv6Scope == "" {
+		config.IPv6Scope = "all"
+	}
+	if config.IPv4Scope != "all" && config.IPv4Scope != "custom" {
+		config.IPv4Scope = "all"
+	}
+	if config.IPv6Scope != "all" && config.IPv6Scope != "custom" {
+		config.IPv6Scope = "all"
+	}
+	if len(config.IPv4APIs) == 0 {
+		config.IPv4APIs = append([]string(nil), defaultPublicIPv4APIs...)
+	}
+	if len(config.IPv6APIs) == 0 {
+		config.IPv6APIs = append([]string(nil), defaultPublicIPv6APIs...)
+	}
 }
 
 // SetAlertConfig 设置告警配置
@@ -209,6 +335,21 @@ func (s *PropertyService) DeleteDNSProvider(ctx context.Context, providerType st
 	return s.SetDNSProviderConfigs(ctx, newProviders)
 }
 
+// GetAgentInstallConfig 获取探针安装配置
+func (s *PropertyService) GetAgentInstallConfig(ctx context.Context) (*models.AgentInstallConfig, error) {
+	var config models.AgentInstallConfig
+	err := s.GetValue(ctx, PropertyIDAgentInstallConfig, &config)
+	if err != nil {
+		return nil, fmt.Errorf("获取探针安装配置失败: %w", err)
+	}
+	return &config, nil
+}
+
+// SetAgentInstallConfig 设置探针安装配置
+func (s *PropertyService) SetAgentInstallConfig(ctx context.Context, config models.AgentInstallConfig) error {
+	return s.Set(ctx, PropertyIDAgentInstallConfig, "探针安装配置", config)
+}
+
 // defaultPropertyConfig 默认配置项定义
 type defaultPropertyConfig struct {
 	ID    string
@@ -226,9 +367,33 @@ func (s *PropertyService) InitializeDefaultConfigs(ctx context.Context) error {
 			Value: models.SystemConfig{
 				SystemNameZh: "皮卡监控",
 				SystemNameEn: "Pika Monitor",
-				LogoBase64:   web.DefaultLogoBase64(),
+				LogoBase64:   assets.DefaultLogoBase64(),
 				ICPCode:      "",
 				DefaultView:  "grid",
+			},
+		},
+		{
+			ID:   PropertyIDAppearanceConfig,
+			Name: "外观配置",
+			Value: AppearanceConfig{
+				ActiveTheme:      "default",
+				DefaultColorMode: "system",
+			},
+		},
+		{
+			ID:   PropertyIDPublicIPConfig,
+			Name: "公网 IP 采集配置",
+			Value: models.PublicIPConfig{
+				Enabled:         false,
+				IntervalSeconds: 300,
+				IPv4Scope:       "all",
+				IPv4AgentIDs:    []string{},
+				IPv6Scope:       "all",
+				IPv6AgentIDs:    []string{},
+				IPv4Enabled:     true,
+				IPv6Enabled:     true,
+				IPv4APIs:        defaultPublicIPv4APIs,
+				IPv6APIs:        defaultPublicIPv6APIs,
 			},
 		},
 		{
@@ -240,7 +405,11 @@ func (s *PropertyService) InitializeDefaultConfigs(ctx context.Context) error {
 			ID:   PropertyIDAlertConfig,
 			Name: "告警配置",
 			Value: models.AlertConfig{
-				Enabled: true, // 默认启用告警
+				Notifications: models.AlertNotifications{
+					TrafficEnabled:         true,
+					SSHLoginSuccessEnabled: true,
+					TamperEventEnabled:     true,
+				},
 				Rules: models.AlertRules{
 					CPUEnabled:           true,
 					CPUThreshold:         80,
@@ -267,6 +436,11 @@ func (s *PropertyService) InitializeDefaultConfigs(ctx context.Context) error {
 			ID:    PropertyIDDNSProviders,
 			Name:  "DNS 服务商配置",
 			Value: []models.DNSProviderConfig{}, // 默认为空数组
+		},
+		{
+			ID:    PropertyIDAgentInstallConfig,
+			Name:  "探针安装配置",
+			Value: models.AgentInstallConfig{ServerURL: ""}, // 默认空字符串，使用自动检测
 		},
 	}
 
@@ -301,4 +475,17 @@ func (s *PropertyService) initializeProperty(ctx context.Context, config default
 	}
 	s.logger.Info("配置默认值已初始化", zap.String("name", config.Name))
 	return nil
+}
+
+func (s *PropertyService) GetSystemVersion(ctx context.Context) (string, error) {
+	var systemVersion string
+	err := s.GetValue(ctx, PropertyIDSystemVersion, &systemVersion)
+	if err != nil {
+		return "", err
+	}
+	return systemVersion, nil
+}
+
+func (s *PropertyService) SetSystemVersion(ctx context.Context, systemVersion string) error {
+	return s.Set(ctx, PropertyIDSystemVersion, "系统版本", systemVersion)
 }

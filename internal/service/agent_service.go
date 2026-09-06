@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/protocol"
-	"github.com/dushixiang/pika/internal/repo"
 	"github.com/go-orz/orz"
+	"github.com/google/uuid"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/protocol"
+	"github.com/pika-monitor/pika/internal/repo"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -19,27 +21,47 @@ import (
 type AgentService struct {
 	logger *zap.Logger
 	*orz.Service
-	AgentRepo     *repo.AgentRepo
-	apiKeyService *ApiKeyService
-	metricService *MetricService
-	geoipService  *GeoIPService
+	AgentRepo         *repo.AgentRepo
+	MonitorRepo       *repo.MonitorRepo
+	TamperEventRepo   *repo.TamperEventRepo
+	SSHLoginEventRepo *repo.SSHLoginEventRepo
+	apiKeyService     *ApiKeyService
+	metricService     *MetricService
+	geoipService      *GeoIPService
+	// enabledCache IsAgentEnabled 的短 TTL 缓存。该检查位于每条
+	// WebSocket 消息的处理路径上，直连数据库会在探针数多时拖垮处理。
+	enabledCache sync.Map // agentID → enabledCacheEntry
 }
+
+type enabledCacheEntry struct {
+	value     bool
+	expiresAt time.Time
+}
+
+// enabledCacheTTL 探针启用状态缓存时长：禁用操作最迟该时长后生效
+const enabledCacheTTL = 3 * time.Second
+
+// ErrInvalidAgentOrder 表示提交的排序列表无法完整、唯一地对应当前探针列表。
+var ErrInvalidAgentOrder = errors.New("无效的探针排序")
 
 func NewAgentService(logger *zap.Logger, db *gorm.DB, apiKeyService *ApiKeyService, metricService *MetricService, geoipService *GeoIPService) *AgentService {
 	return &AgentService{
-		logger:        logger,
-		Service:       orz.NewService(db),
-		AgentRepo:     repo.NewAgentRepo(db),
-		apiKeyService: apiKeyService,
-		metricService: metricService,
-		geoipService:  geoipService,
+		logger:            logger,
+		Service:           orz.NewService(db),
+		AgentRepo:         repo.NewAgentRepo(db),
+		MonitorRepo:       repo.NewMonitorRepo(db),
+		TamperEventRepo:   repo.NewTamperEventRepo(db),
+		SSHLoginEventRepo: repo.NewSSHLoginEventRepo(db),
+		apiKeyService:     apiKeyService,
+		metricService:     metricService,
+		geoipService:      geoipService,
 	}
 }
 
 // RegisterAgent 注册探针
 func (s *AgentService) RegisterAgent(ctx context.Context, ip string, info *protocol.AgentInfo, apiKey string) (*models.Agent, error) {
 	// 验证API密钥
-	if _, err := s.apiKeyService.ValidateApiKey(ctx, apiKey); err != nil {
+	if _, err := s.apiKeyService.ValidateApiKey(ctx, apiKey, "agent"); err != nil {
 		s.logger.Warn("agent registration failed: invalid api key",
 			zap.String("agentID", info.ID),
 			zap.String("hostname", info.Hostname),
@@ -53,10 +75,18 @@ func (s *AgentService) RegisterAgent(ctx context.Context, ip string, info *proto
 	}
 
 	// 使用探针的持久化 ID 来识别同一个探针
-	// 这样即使主机名或 IP 变化，也能正确识别
+	// 这样即使主机名变化，也能正确识别
 	existingAgent, err := s.AgentRepo.FindById(ctx, info.ID)
 	if err == nil {
-		// 更新现有探针信息（允许主机名、IP、名称等变化）
+		// 已禁用的探针仅维持连接，不用注册报文刷新任何主机数据或在线状态。
+		if !existingAgent.Enabled {
+			s.logger.Info("disabled agent reconnected; registration data ignored",
+				zap.String("agentID", existingAgent.ID),
+				zap.String("hostname", existingAgent.Hostname))
+			return &existingAgent, nil
+		}
+
+		// 更新现有探针信息（允许主机名、名称等变化）
 		now := time.Now().UnixMilli()
 		existingAgent.Hostname = info.Hostname
 		existingAgent.IP = ip
@@ -79,6 +109,24 @@ func (s *AgentService) RegisterAgent(ctx context.Context, ip string, info *proto
 		return &existingAgent, nil
 	}
 
+	// 检查短 ID 前缀是否与已有探针冲突（防止短链接歧义）
+	var shortID string
+	if len(info.ID) >= 8 {
+		shortID = info.ID[:8]
+	} else {
+		shortID = info.ID
+	}
+	_, err = s.AgentRepo.FindByShortID(ctx, shortID)
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		// 前缀冲突，服务器分配新 UUID
+		s.logger.Warn("agent ID prefix collision detected, assigning new UUID",
+			zap.String("originalID", info.ID),
+			zap.String("conflictPrefix", shortID),
+			zap.String("hostname", info.Hostname),
+		)
+		info.ID = uuid.NewString()
+	}
+
 	// 创建新探针（使用客户端提供的持久化 ID）
 	now := time.Now().UnixMilli()
 	agent := &models.Agent{
@@ -89,6 +137,7 @@ func (s *AgentService) RegisterAgent(ctx context.Context, ip string, info *proto
 		OS:         info.OS,
 		Arch:       info.Arch,
 		Version:    info.Version,
+		Enabled:    true,
 		Status:     1,
 		LastSeenAt: now,
 		CreatedAt:  now,
@@ -113,6 +162,60 @@ func (s *AgentService) UpdateAgentStatus(ctx context.Context, agentID string, st
 	return s.AgentRepo.UpdateStatus(ctx, agentID, status, time.Now().UnixMilli())
 }
 
+// IsAgentEnabled 查询探针是否允许接收并处理数据（带短 TTL 缓存，
+// 禁用操作会立即失效缓存）。
+func (s *AgentService) IsAgentEnabled(ctx context.Context, agentID string) (bool, error) {
+	if cached, ok := s.enabledCache.Load(agentID); ok {
+		entry := cached.(enabledCacheEntry)
+		if time.Now().Before(entry.expiresAt) {
+			return entry.value, nil
+		}
+	}
+
+	enabled, err := s.AgentRepo.IsEnabled(ctx, agentID)
+	if err != nil {
+		return false, err
+	}
+
+	s.enabledCache.Store(agentID, enabledCacheEntry{
+		value:     enabled,
+		expiresAt: time.Now().Add(enabledCacheTTL),
+	})
+	return enabled, nil
+}
+
+// UpdateAgentEnabled 更新探针启用状态。禁用时立即标记离线，后续状态更新由仓储层原子拦截。
+func (s *AgentService) UpdateAgentEnabled(ctx context.Context, agentID string, enabled bool) error {
+	if _, err := s.AgentRepo.FindById(ctx, agentID); err != nil {
+		return err
+	}
+
+	updates := map[string]interface{}{
+		"enabled":    enabled,
+		"updated_at": time.Now().UnixMilli(),
+	}
+	if !enabled {
+		updates["status"] = 0
+	}
+	if err := s.AgentRepo.UpdateColumnsById(ctx, agentID, updates); err != nil {
+		return err
+	}
+
+	// 立即失效缓存，让禁用/启用马上对消息处理路径生效
+	s.enabledCache.Delete(agentID)
+	return nil
+}
+
+// UpdatePublicIP 更新探针的公网 IP 信息
+func (s *AgentService) UpdatePublicIP(ctx context.Context, agentID string, ipv4 string, ipv6 string) error {
+	updates := map[string]interface{}{
+		"updated_at": time.Now().UnixMilli(),
+		"ipv4":       ipv4,
+		"ipv6":       ipv6,
+	}
+	return s.AgentRepo.UpdateColumnsById(ctx, agentID, updates)
+}
+
 // GetAgent 获取探针信息
 func (s *AgentService) GetAgent(ctx context.Context, agentID string) (*models.Agent, error) {
 	agent, err := s.AgentRepo.FindById(ctx, agentID)
@@ -127,9 +230,66 @@ func (s *AgentService) ListAgents(ctx context.Context) ([]models.Agent, error) {
 	return s.AgentRepo.FindAll(ctx)
 }
 
+// UpdateAgentOrder 按从前到后的 ID 顺序重新分配探针权重。
+// 请求必须包含当前全部探针，避免筛选状态下排序时意外覆盖未展示探针的相对顺序。
+func (s *AgentService) UpdateAgentOrder(ctx context.Context, agentIDs []string) error {
+	if len(agentIDs) == 0 {
+		return fmt.Errorf("%w: 探针ID列表不能为空", ErrInvalidAgentOrder)
+	}
+
+	agents, err := s.AgentRepo.FindAll(ctx)
+	if err != nil {
+		return err
+	}
+	if len(agentIDs) != len(agents) {
+		return fmt.Errorf("%w: 排序列表必须包含全部探针", ErrInvalidAgentOrder)
+	}
+
+	existingIDs := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		existingIDs[agent.ID] = struct{}{}
+	}
+
+	seenIDs := make(map[string]struct{}, len(agentIDs))
+	for _, agentID := range agentIDs {
+		if _, exists := existingIDs[agentID]; !exists {
+			return fmt.Errorf("%w: 探针 %q 不存在", ErrInvalidAgentOrder, agentID)
+		}
+		if _, duplicated := seenIDs[agentID]; duplicated {
+			return fmt.Errorf("%w: 探针 %q 重复", ErrInvalidAgentOrder, agentID)
+		}
+		seenIDs[agentID] = struct{}{}
+	}
+
+	now := time.Now().UnixMilli()
+	return s.Transaction(ctx, func(ctx context.Context) error {
+		for index, agentID := range agentIDs {
+			if err := s.AgentRepo.UpdateColumnsById(ctx, agentID, map[string]interface{}{
+				"weight":     len(agentIDs) - index,
+				"updated_at": now,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // ListOnlineAgents 列出所有在线探针
 func (s *AgentService) ListOnlineAgents(ctx context.Context) ([]models.Agent, error) {
 	return s.AgentRepo.FindOnlineAgents(ctx)
+}
+
+// IsAgentByIP 检查指定公网IP是否为探针
+func (s *AgentService) IsAgentByIP(ctx context.Context, ip string) (bool, error) {
+	_, err := s.AgentRepo.FindByIP(ctx, ip)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // HandleCommandResponse 处理指令响应
@@ -330,17 +490,23 @@ func (s *AgentService) GetStatistics(ctx context.Context) (map[string]interface{
 
 // DeleteAgent 删除探针及其所有相关数据
 func (s *AgentService) DeleteAgent(ctx context.Context, agentID string) error {
-	// 在事务中执行所有删除操作
-	return s.Transaction(ctx, func(ctx context.Context) error {
-		// 1. 删除探针的所有指标数据
-		if err := s.metricService.DeleteAgentMetrics(ctx, agentID); err != nil {
-			s.logger.Error("删除探针指标数据失败", zap.String("agentId", agentID), zap.Error(err))
+	// 在事务中执行所有数据库删除操作
+	err := s.Transaction(ctx, func(ctx context.Context) error {
+		// 1. 删除探针的审计结果
+		if err := s.AgentRepo.DeleteAuditResults(ctx, agentID); err != nil {
+			s.logger.Error("删除探针审计结果失败", zap.String("agentId", agentID), zap.Error(err))
 			return err
 		}
 
-		// 2. 删除探针的审计结果
-		if err := s.AgentRepo.DeleteAuditResults(ctx, agentID); err != nil {
-			s.logger.Error("删除探针审计结果失败", zap.String("agentId", agentID), zap.Error(err))
+		// 2. 删除探针的目录保护事件数据
+		if err := s.TamperEventRepo.DeleteEventsByAgentID(ctx, agentID); err != nil {
+			s.logger.Error("删除探针目录保护事件失败", zap.String("agentId", agentID), zap.Error(err))
+			return err
+		}
+
+		// 3. 删除探针的SSH登录事件数据
+		if err := s.SSHLoginEventRepo.DeleteEventsByAgentID(ctx, agentID); err != nil {
+			s.logger.Error("删除探针SSH登录事件失败", zap.String("agentId", agentID), zap.Error(err))
 			return err
 		}
 
@@ -350,29 +516,76 @@ func (s *AgentService) DeleteAgent(ctx context.Context, agentID string) error {
 			return err
 		}
 
-		s.logger.Info("探针删除成功", zap.String("agentId", agentID))
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	// 5. 清理内存缓存中的探针数据（事务外执行）
+	if s.metricService != nil {
+		// 清理探针最新指标缓存
+		s.metricService.DeleteAgentLatestMetricsCache(agentID)
+
+		// 清理监控缓存中该探针的数据
+		s.metricService.CleanAgentFromMonitorCache(agentID)
+	}
+
+	// 6. 清理 VictoriaMetrics 中的指标数据（事务外执行，失败不影响数据库删除结果）
+	if s.metricService != nil {
+		if err := s.metricService.CleanAgentMetrics(ctx, agentID); err != nil {
+			s.logger.Error("清理VictoriaMetrics中的探针指标数据失败", zap.String("agentId", agentID), zap.Error(err))
+			// 记录错误但不返回，因为数据库删除已成功
+		}
+	}
+
+	s.logger.Info("探针删除成功", zap.String("agentId", agentID))
+	return nil
 }
 
 // ListByAuth 根据认证状态列出探针（已登录返回全部，未登录返回公开可见）
 func (s *AgentService) ListByAuth(ctx context.Context, isAuthenticated bool) ([]models.Agent, error) {
 	if isAuthenticated {
-		return s.AgentRepo.FindAll(ctx)
+		return s.AgentRepo.FindEnabledAgents(ctx)
 	}
 	return s.AgentRepo.FindPublicAgents(ctx)
 }
 
 // GetAgentByAuth 根据认证状态获取探针（已登录返回全部，未登录返回公开可见）
+// 支持完整UUID和短ID（前缀匹配）
 func (s *AgentService) GetAgentByAuth(ctx context.Context, id string, isAuthenticated bool) (*models.Agent, error) {
 	if isAuthenticated {
 		agent, err := s.AgentRepo.FindById(ctx, id)
+		if err == nil {
+			if !agent.Enabled {
+				return nil, gorm.ErrRecordNotFound
+			}
+			return &agent, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		// 精确匹配失败，尝试短ID前缀匹配
+		agent, err = s.AgentRepo.FindByShortID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
+		if !agent.Enabled {
+			return nil, gorm.ErrRecordNotFound
+		}
 		return &agent, nil
 	}
-	return s.AgentRepo.FindPublicAgentByID(ctx, id)
+
+	agent, err := s.AgentRepo.FindPublicAgentByID(ctx, id)
+	if err == nil {
+		return agent, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	// 精确匹配失败，尝试短ID前缀匹配
+	return s.AgentRepo.FindPublicAgentByShortID(ctx, id)
 }
 
 // GetAllTags 获取所有探针的标签
@@ -402,8 +615,19 @@ func (s *AgentService) BatchUpdateTags(ctx context.Context, agentIDs []string, t
 		return err
 	}
 
+	// 收集受影响的标签（变更前的标签 + 本次操作涉及的标签），用于事后清理监控缓存
+	affectedTags := make(map[string]struct{})
+	for _, tag := range tags {
+		affectedTags[tag] = struct{}{}
+	}
+	for _, agent := range agents {
+		for _, tag := range agent.Tags {
+			affectedTags[tag] = struct{}{}
+		}
+	}
+
 	// 在事务中执行批量更新
-	return s.Transaction(ctx, func(ctx context.Context) error {
+	if err := s.Transaction(ctx, func(ctx context.Context) error {
 		for _, agent := range agents {
 			// 根据操作类型处理标签
 			var newTags []string
@@ -452,6 +676,74 @@ func (s *AgentService) BatchUpdateTags(ctx context.Context, agentIDs []string, t
 				zap.Strings("tags", newTags))
 		}
 		return nil
+	}); err != nil {
+		return err
+	}
+
+	// 标签变更后，清理引用了受影响标签的监控任务缓存（避免已移出探针的数据残留）
+	s.cleanupMonitorCacheForTags(ctx, affectedTags)
+
+	return nil
+}
+
+// cleanupMonitorCacheForTags 清理引用了指定标签的监控任务缓存（失败仅记录日志，不影响主流程）
+func (s *AgentService) cleanupMonitorCacheForTags(ctx context.Context, tags map[string]struct{}) {
+	if len(tags) == 0 || s.metricService == nil {
+		return
+	}
+
+	tagList := make([]string, 0, len(tags))
+	for tag := range tags {
+		if tag != "" {
+			tagList = append(tagList, tag)
+		}
+	}
+
+	monitors, err := s.MonitorRepo.FindByAnyTags(ctx, tagList)
+	if err != nil {
+		s.logger.Warn("查询引用标签的监控任务失败", zap.Strings("tags", tagList), zap.Error(err))
+		return
+	}
+
+	for _, monitor := range monitors {
+		if err := s.metricService.CleanMonitorCache(ctx, monitor.ID); err != nil {
+			s.logger.Warn("清理监控缓存失败", zap.String("monitorID", monitor.ID), zap.Error(err))
+		}
+	}
+}
+
+// BatchUpdateVisibility 批量更新探针可见性
+func (s *AgentService) BatchUpdateVisibility(ctx context.Context, agentIDs []string, visibility string) error {
+	if len(agentIDs) == 0 {
+		return fmt.Errorf("探针ID列表不能为空")
+	}
+
+	// 验证可见性参数
+	if visibility != "public" && visibility != "private" {
+		return fmt.Errorf("可见性参数错误，必须是 public 或 private")
+	}
+
+	agents, err := s.AgentRepo.FindByIdIn(ctx, agentIDs)
+	if err != nil {
+		return err
+	}
+
+	// 在事务中执行批量更新
+	return s.Transaction(ctx, func(ctx context.Context) error {
+		for _, agent := range agents {
+			// 更新探针可见性
+			agent.Visibility = visibility
+			agent.UpdatedAt = time.Now().UnixMilli()
+			if err := s.AgentRepo.UpdateById(ctx, &agent); err != nil {
+				s.logger.Error("更新探针可见性失败", zap.String("agentId", agent.ID), zap.Error(err))
+				return err
+			}
+
+			s.logger.Info("探针可见性更新成功",
+				zap.String("agentId", agent.ID),
+				zap.String("visibility", visibility))
+		}
+		return nil
 	})
 }
 
@@ -466,188 +758,4 @@ func (s *AgentService) InitStatus(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-// UpdateTrafficConfig 更新流量配置
-func (s *AgentService) UpdateTrafficConfig(ctx context.Context, agentID string, limit uint64, resetDay int) error {
-	if resetDay < 0 || resetDay > 31 {
-		return fmt.Errorf("重置日期必须在0-31之间")
-	}
-
-	agent, err := s.AgentRepo.FindById(ctx, agentID)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now().UnixMilli()
-	oldResetDay := agent.TrafficResetDay
-
-	agent.TrafficLimit = limit
-	agent.TrafficResetDay = resetDay
-
-	// 如果是首次设置或修改重置日期,重置流量统计
-	if agent.TrafficPeriodStart == 0 || resetDay != oldResetDay {
-		agent.TrafficUsed = 0
-		agent.TrafficPeriodStart = now
-		agent.TrafficBaselineRecv = 0 // 下次上报时会设置正确的基线
-		agent.TrafficAlertSent80 = false
-		agent.TrafficAlertSent90 = false
-		agent.TrafficAlertSent100 = false
-	}
-
-	agent.UpdatedAt = now
-	return s.AgentRepo.UpdateById(ctx, &agent)
-}
-
-// GetTrafficStats 获取流量统计信息
-func (s *AgentService) GetTrafficStats(ctx context.Context, agentID string) (*TrafficStats, error) {
-	agent, err := s.AgentRepo.FindById(ctx, agentID)
-	if err != nil {
-		return nil, err
-	}
-
-	stats := &TrafficStats{
-		TrafficLimit:    agent.TrafficLimit,
-		TrafficUsed:     agent.TrafficUsed,
-		TrafficResetDay: agent.TrafficResetDay,
-		PeriodStart:     agent.TrafficPeriodStart,
-		AlertsSent: TrafficAlerts{
-			Sent80:  agent.TrafficAlertSent80,
-			Sent90:  agent.TrafficAlertSent90,
-			Sent100: agent.TrafficAlertSent100,
-		},
-	}
-
-	// 计算使用百分比
-	if agent.TrafficLimit > 0 {
-		stats.TrafficUsedPercent = float64(agent.TrafficUsed) / float64(agent.TrafficLimit) * 100
-		if agent.TrafficUsed < agent.TrafficLimit {
-			stats.TrafficRemaining = agent.TrafficLimit - agent.TrafficUsed
-		} else {
-			stats.TrafficRemaining = 0
-		}
-	}
-
-	// 计算下次重置日期和剩余天数
-	if agent.TrafficResetDay > 0 && agent.TrafficPeriodStart > 0 {
-		periodStart := time.UnixMilli(agent.TrafficPeriodStart)
-		nextReset := calculateNextResetDate(periodStart, agent.TrafficResetDay)
-		stats.PeriodEnd = nextReset.UnixMilli()
-		stats.DaysUntilReset = int(time.Until(nextReset).Hours() / 24)
-		if stats.DaysUntilReset < 0 {
-			stats.DaysUntilReset = 0
-		}
-	}
-
-	return stats, nil
-}
-
-// ResetAgentTraffic 重置探针流量
-func (s *AgentService) ResetAgentTraffic(ctx context.Context, agentID string) error {
-	agent, err := s.AgentRepo.FindById(ctx, agentID)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now().UnixMilli()
-
-	updates := map[string]interface{}{
-		"traffic_used":          0,
-		"traffic_baseline_recv": 0, // 下次上报时会设置正确的基线
-		"traffic_period_start":  now,
-		"traffic_alert_sent80":  false,
-		"traffic_alert_sent90":  false,
-		"traffic_alert_sent100": false,
-		"updated_at":            now,
-	}
-
-	s.logger.Info("探针流量已重置",
-		zap.String("agentId", agentID),
-		zap.String("agentName", agent.Name))
-
-	return s.AgentRepo.UpdateTrafficStats(ctx, agentID, updates)
-}
-
-// CheckAndResetTraffic 检查并重置所有到期的探针流量(定时任务调用)
-func (s *AgentService) CheckAndResetTraffic(ctx context.Context) error {
-	agents, err := s.AgentRepo.FindAgentsWithTrafficReset(ctx)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now()
-	resetCount := 0
-
-	for _, agent := range agents {
-		if s.shouldResetTraffic(&agent, now) {
-			if err := s.ResetAgentTraffic(ctx, agent.ID); err != nil {
-				s.logger.Error("重置探针流量失败",
-					zap.String("agentId", agent.ID),
-					zap.Error(err))
-				continue
-			}
-			resetCount++
-		}
-	}
-
-	if resetCount > 0 {
-		s.logger.Info("流量重置检查完成", zap.Int("重置数量", resetCount))
-	}
-
-	return nil
-}
-
-// shouldResetTraffic 判断是否需要重置流量
-func (s *AgentService) shouldResetTraffic(agent *models.Agent, now time.Time) bool {
-	if agent.TrafficResetDay == 0 || agent.TrafficPeriodStart == 0 {
-		return false
-	}
-
-	periodStart := time.UnixMilli(agent.TrafficPeriodStart)
-	nextReset := calculateNextResetDate(periodStart, agent.TrafficResetDay)
-
-	return now.After(nextReset) || now.Equal(nextReset)
-}
-
-// calculateNextResetDate 计算下次重置日期
-func calculateNextResetDate(periodStart time.Time, resetDay int) time.Time {
-	year, month, _ := periodStart.Date()
-	location := periodStart.Location()
-
-	// 计算下一个月
-	nextMonth := month + 1
-	nextYear := year
-	if nextMonth > 12 {
-		nextMonth = 1
-		nextYear++
-	}
-
-	// 处理月末日期(如2月没有31号)
-	lastDayOfMonth := time.Date(nextYear, nextMonth+1, 0, 0, 0, 0, 0, time.UTC).Day()
-	actualDay := resetDay
-	if resetDay > lastDayOfMonth {
-		actualDay = lastDayOfMonth
-	}
-
-	return time.Date(nextYear, nextMonth, actualDay, 0, 0, 0, 0, location)
-}
-
-// TrafficStats 流量统计信息
-type TrafficStats struct {
-	TrafficLimit       uint64        `json:"trafficLimit"`
-	TrafficUsed        uint64        `json:"trafficUsed"`
-	TrafficUsedPercent float64       `json:"trafficUsedPercent"`
-	TrafficRemaining   uint64        `json:"trafficRemaining"`
-	TrafficResetDay    int           `json:"trafficResetDay"`
-	PeriodStart        int64         `json:"periodStart"`
-	PeriodEnd          int64         `json:"periodEnd"`
-	DaysUntilReset     int           `json:"daysUntilReset"`
-	AlertsSent         TrafficAlerts `json:"alerts"`
-}
-
-// TrafficAlerts 流量告警状态
-type TrafficAlerts struct {
-	Sent80  bool `json:"sent80"`
-	Sent90  bool `json:"sent90"`
-	Sent100 bool `json:"sent100"`
 }

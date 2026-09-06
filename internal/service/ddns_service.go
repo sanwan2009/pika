@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dushixiang/pika/internal/ddns"
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/protocol"
-	"github.com/dushixiang/pika/internal/repo"
-	"github.com/dushixiang/pika/internal/websocket"
+	"github.com/pika-monitor/pika/internal/ddns"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/protocol"
+	"github.com/pika-monitor/pika/internal/repo"
+	"github.com/pika-monitor/pika/internal/websocket"
 
 	"github.com/go-orz/toolkit/syncx"
 	"github.com/google/uuid"
@@ -35,16 +35,14 @@ type DDNSService struct {
 }
 
 func NewDDNSService(
-	logger *zap.Logger,
-	configRepo *repo.DDNSConfigRepo,
-	recordRepo *repo.DDNSRecordRepo,
+	logger *zap.Logger, db *gorm.DB,
 	propertyService *PropertyService,
 	wsManager *websocket.Manager,
 ) *DDNSService {
 	s := &DDNSService{
 		logger:          logger,
-		ConfigRepo:      configRepo,
-		recordRepo:      recordRepo,
+		ConfigRepo:      repo.NewDDNSConfigRepo(db),
+		recordRepo:      repo.NewDDNSRecordRepo(db),
 		propertyService: propertyService,
 		wsManager:       wsManager,
 		ipCache:         syncx.NewSafeMap[string, *ipCacheData](),
@@ -132,6 +130,14 @@ func (s *DDNSService) initIPCache() {
 	}
 
 	s.logger.Info("IP 缓存初始化完成")
+}
+
+func (s *DDNSService) clearIPCache(agentID string, reason string) {
+	if agentID == "" {
+		return
+	}
+	s.ipCache.Delete(agentID)
+	s.logger.Debug("清理 IP 缓存", zap.String("agentId", agentID), zap.String("reason", reason))
 }
 
 // HandleIPReport 处理客户端上报的 IP 地址
@@ -329,13 +335,33 @@ func (s *DDNSService) CreateConfig(ctx context.Context, config *models.DDNSConfi
 
 // UpdateConfig 更新 DDNS 配置
 func (s *DDNSService) UpdateConfig(ctx context.Context, config *models.DDNSConfig) error {
-	return s.ConfigRepo.Save(ctx, config)
+	if err := s.ConfigRepo.Save(ctx, config); err != nil {
+		return err
+	}
+	s.clearIPCache(config.AgentID, "config_updated")
+	return nil
 }
 
 func (s *DDNSService) UpdateEnabled(ctx context.Context, id string, enabled bool) error {
-	return s.ConfigRepo.UpdateColumnsById(ctx, id, map[string]interface{}{
+	config, err := s.GetConfig(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.ConfigRepo.UpdateColumnsById(ctx, id, map[string]interface{}{
 		"enabled": enabled,
-	})
+	}); err != nil {
+		return err
+	}
+	config.Enabled = enabled
+	s.clearIPCache(config.AgentID, "enabled_updated")
+	if enabled {
+		if err := s.sendDDNSConfigToAgent(config); err != nil {
+			s.logger.Debug("启用后发送 DDNS 配置失败",
+				zap.String("agentID", config.AgentID),
+				zap.Error(err))
+		}
+	}
+	return nil
 }
 
 // GetConfig 获取 DDNS 配置
@@ -349,12 +375,22 @@ func (s *DDNSService) GetConfig(ctx context.Context, id string) (*models.DDNSCon
 
 // DeleteConfig 删除 DDNS 配置
 func (s *DDNSService) DeleteConfig(ctx context.Context, id string) error {
+	config, err := s.GetConfig(ctx, id)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
 	// 先删除相关记录
 	if err := s.recordRepo.DeleteByConfigID(ctx, id); err != nil {
 		return err
 	}
 	// 删除配置
-	return s.ConfigRepo.DeleteById(ctx, id)
+	if err := s.ConfigRepo.DeleteById(ctx, id); err != nil {
+		return err
+	}
+	if err == nil {
+		s.clearIPCache(config.AgentID, "config_deleted")
+	}
+	return nil
 }
 
 // Run 启动 DDNS 定时任务
@@ -387,6 +423,27 @@ func (s *DDNSService) checkDDNS() {
 		return
 	}
 
+	enabledAgents := make(map[string]struct{}, len(configs))
+	for _, config := range configs {
+		if config.AgentID != "" {
+			enabledAgents[config.AgentID] = struct{}{}
+		}
+	}
+
+	allAgents, err := s.ConfigRepo.ListAgentIDs(ctx)
+	if err != nil {
+		s.logger.Error("查询 DDNS 探针列表失败", zap.Error(err))
+	} else {
+		for _, agentID := range allAgents {
+			if agentID == "" {
+				continue
+			}
+			if _, ok := enabledAgents[agentID]; !ok {
+				s.clearIPCache(agentID, "disabled_or_missing")
+			}
+		}
+	}
+
 	// 并发向每个配置对应的在线探针发送 DDNS 配置
 	for _, config := range configs {
 		agentID := config.AgentID
@@ -417,4 +474,33 @@ func (s *DDNSService) sendDDNSConfigToAgent(config *models.DDNSConfig) error {
 	}
 
 	return s.wsManager.SendToClient(config.AgentID, msgData)
+}
+
+// TriggerUpdate 手动触发 DDNS 更新
+// 向探针发送配置消息，触发探针立即获取并上报 IP 地址
+func (s *DDNSService) TriggerUpdate(ctx context.Context, configID string) error {
+	// 获取配置
+	config, err := s.GetConfig(ctx, configID)
+	if err != nil {
+		return fmt.Errorf("获取 DDNS 配置失败: %w", err)
+	}
+
+	// 检查配置是否启用
+	if !config.Enabled {
+		return fmt.Errorf("DDNS 配置未启用")
+	}
+
+	s.clearIPCache(config.AgentID, "manual_trigger")
+
+	// 向探针发送配置，触发探针立即上报 IP
+	if err := s.sendDDNSConfigToAgent(config); err != nil {
+		return fmt.Errorf("向探针发送配置失败: %w", err)
+	}
+
+	s.logger.Info("手动触发 DDNS 更新成功",
+		zap.String("configID", configID),
+		zap.String("agentID", config.AgentID),
+		zap.String("name", config.Name))
+
+	return nil
 }

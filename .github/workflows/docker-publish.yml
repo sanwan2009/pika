@@ -10,8 +10,10 @@ env:
   DOCKER_REGISTRY: docker.io
   # 使用 GitHub Container Registry
   GHCR_REGISTRY: ghcr.io
-  # 镜像名称（需要根据实际情况修改）
-  IMAGE_NAME: ${{ github.repository }}
+  # Docker Hub 使用个人账号下的固定镜像仓库
+  DOCKER_IMAGE_NAME: dushixiang/pika
+  # GHCR 保持使用当前 GitHub 仓库名，以匹配 GITHUB_TOKEN 的包写入权限
+  GHCR_IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -30,6 +32,17 @@ jobs:
       # 检出代码
       - name: 检出代码
         uses: actions/checkout@v4
+
+      - name: 读取默认主题锁定版本
+        run: echo "DEFAULT_THEME_REF=$(tr -d '\r\n' < .github/default-theme.ref)" >> "$GITHUB_ENV"
+
+      # 默认主题作为独立源码仓库参与 Pika 发布构建
+      - name: 检出官方默认主题
+        uses: actions/checkout@v4
+        with:
+          repository: pika-monitor/pika-default-theme
+          ref: ${{ env.DEFAULT_THEME_REF }}
+          path: pika-default-theme
 
       # 安装 make 和 upx
       - name: 安装 make 和 upx
@@ -52,7 +65,7 @@ jobs:
       # 构建所有组件（前端、agents、服务端）
       - name: 构建所有组件
         run: |
-          make build-release
+          make DEFAULT_THEME_DIR=pika-default-theme build-release
 
       # 列出编译产物
       - name: 列出编译产物
@@ -93,8 +106,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ env.GHCR_REGISTRY }}/${{ env.IMAGE_NAME }}
+            ${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -115,10 +128,10 @@ jobs:
           build-args: |
             VERSION=${{ env.VERSION }}
           cache-from: |
-            type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:cache
+            type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}:cache
             type=local,src=/tmp/.buildx-cache
           cache-to: |
-            type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:cache,mode=max
+            type=registry,ref=${{ env.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE_NAME }}:cache,mode=max
             type=local,dest=/tmp/.buildx-cache
 
       # 生成构建总结

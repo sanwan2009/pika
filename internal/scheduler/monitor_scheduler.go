@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dushixiang/pika/internal/service"
+	"github.com/pika-monitor/pika/internal/service"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 )
@@ -122,19 +122,21 @@ func (s *MonitorScheduler) addTaskLocked(monitorID string, interval int) error {
 	// 构建 cron 表达式: @every Ns
 	spec := fmt.Sprintf("@every %ds", interval)
 
-	// 添加到 cron 调度器
+	// 回调绑定本次注册的任务代际。即使异常并发或未来的新路径留下了
+	// 未被 map 追踪的 cron entry，旧代际在执行前也会自行失效。
+	task := &MonitorTask{ID: monitorID}
 	entryID, err := s.cron.AddFunc(spec, func() {
-		s.executeTask(monitorID)
+		if s.isCurrentTask(task) {
+			s.executeTask(monitorID)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("添加 cron 任务失败: %w", err)
 	}
 
 	// 保存任务信息
-	s.tasks[monitorID] = &MonitorTask{
-		ID:      monitorID,
-		EntryID: entryID,
-	}
+	task.EntryID = entryID
+	s.tasks[monitorID] = task
 
 	s.logger.Info("添加监控任务",
 		zap.String("taskID", monitorID),
@@ -143,11 +145,21 @@ func (s *MonitorScheduler) addTaskLocked(monitorID string, interval int) error {
 	return nil
 }
 
-// UpdateTask 更新监控任务（先删除再添加）
+// isCurrentTask 判断 cron 回调是否仍属于该监控任务的当前注册代际。
+func (s *MonitorScheduler) isCurrentTask(task *MonitorTask) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.tasks[task.ID] == task
+}
+
+// UpdateTask 原子更新监控任务。所有 cron entry 与 tasks 映射的变更必须
+// 共用同一把锁，否则并发更新可能各自添加 entry，最终只有一个被记录，
+// 其余 entry 会成为无法移除且持续重复执行的孤儿任务。
 func (s *MonitorScheduler) UpdateTask(monitorID string, interval int) error {
-	// 移除旧监控任务
-	s.removeTaskLocked(monitorID)
-	// 添加新任务
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// addTaskLocked 会在添加前移除已有 entry。
 	return s.addTaskLocked(monitorID, interval)
 }
 

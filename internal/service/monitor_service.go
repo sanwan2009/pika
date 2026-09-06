@@ -3,16 +3,18 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
-	"github.com/dushixiang/pika/internal/metric"
-	"github.com/dushixiang/pika/internal/models"
-	"github.com/dushixiang/pika/internal/protocol"
-	"github.com/dushixiang/pika/internal/repo"
-	ws "github.com/dushixiang/pika/internal/websocket"
 	"github.com/go-orz/orz"
 	"github.com/google/uuid"
+	"github.com/pika-monitor/pika/internal/metric"
+	"github.com/pika-monitor/pika/internal/models"
+	"github.com/pika-monitor/pika/internal/protocol"
+	"github.com/pika-monitor/pika/internal/repo"
+	ws "github.com/pika-monitor/pika/internal/websocket"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -23,7 +25,6 @@ type MonitorService struct {
 	*repo.MonitorRepo
 	*orz.Service
 	agentRepo     *repo.AgentRepo
-	metricRepo    *repo.MetricRepo
 	metricService *MetricService
 	wsManager     *ws.Manager
 
@@ -44,7 +45,6 @@ func NewMonitorService(logger *zap.Logger, db *gorm.DB, metricService *MetricSer
 		Service:       orz.NewService(db),
 		MonitorRepo:   repo.NewMonitorRepo(db),
 		agentRepo:     repo.NewAgentRepo(db),
-		metricRepo:    repo.NewMetricRepo(db),
 		metricService: metricService,
 		wsManager:     wsManager,
 	}
@@ -68,7 +68,7 @@ type MonitorTaskRequest struct {
 	TCPConfig        protocol.TCPMonitorConfig  `json:"tcpConfig,omitempty"`
 	ICMPConfig       protocol.ICMPMonitorConfig `json:"icmpConfig,omitempty"`
 	AgentIds         []string                   `json:"agentIds,omitempty"`
-	Tags             []string                   `json:"tags"`
+	Tags             []string                   `json:"tags,omitempty"` // 标签列表，拥有这些标签的探针都会执行此监控
 }
 
 func (s *MonitorService) CreateMonitor(ctx context.Context, req *MonitorTaskRequest) (*models.MonitorTask, error) {
@@ -136,7 +136,6 @@ func (s *MonitorService) UpdateMonitor(ctx context.Context, id string, req *Moni
 	task.Description = req.Description
 	task.ShowTargetPublic = req.ShowTargetPublic
 	task.Visibility = req.Visibility
-	task.Tags = req.Tags
 
 	// 更新检测频率
 	interval := req.Interval
@@ -146,12 +145,23 @@ func (s *MonitorService) UpdateMonitor(ctx context.Context, id string, req *Moni
 	task.Interval = interval
 
 	task.AgentIds = req.AgentIds
+	task.Tags = req.Tags
 	task.HTTPConfig = datatypes.NewJSONType(req.HTTPConfig)
 	task.TCPConfig = datatypes.NewJSONType(req.TCPConfig)
 	task.ICMPConfig = datatypes.NewJSONType(req.ICMPConfig)
 
 	if err := s.MonitorRepo.Save(ctx, &task); err != nil {
 		return nil, err
+	}
+
+	// 清理监控缓存中不再关联的探针数据
+	if s.metricService != nil {
+		if err := s.metricService.CleanMonitorCache(ctx, id); err != nil {
+			s.logger.Warn("清理监控缓存失败",
+				zap.String("monitorID", id),
+				zap.Error(err))
+			// 不返回错误，继续执行
+		}
 	}
 
 	// 更新调度器
@@ -213,13 +223,35 @@ func (s *MonitorService) ListByAuth(ctx context.Context, isAuthenticated bool) (
 	items := make([]metric.PublicMonitorOverview, 0, len(monitors))
 	for _, monitor := range monitors {
 		// 查询统计数据
-		stats := s.metricService.GetMonitorStats(monitor.ID)
+		stats := s.metricService.GetMonitorStats(ctx, monitor.ID)
 		// 构建监控概览对象
 		item := s.buildMonitorOverview(monitor, stats)
 		items = append(items, item)
 	}
 
 	return items, nil
+}
+
+// GetMonitorSparklinesByAuth 返回当前访问者可见监控项的批量走势图。
+func (s *MonitorService) GetMonitorSparklinesByAuth(ctx context.Context, isAuthenticated bool) (*metric.PublicMonitorSparklinesResponse, error) {
+	monitors, err := s.FindByAuth(ctx, isAuthenticated)
+	if err != nil {
+		return nil, err
+	}
+
+	monitorIDs := make([]string, 0, len(monitors))
+	for _, monitor := range monitors {
+		monitorIDs = append(monitorIDs, monitor.ID)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	generatedAt, items, err := s.metricService.GetCachedMonitorSparklines(queryCtx, monitorIDs, time.Hour, 20*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	return &metric.PublicMonitorSparklinesResponse{GeneratedAt: generatedAt, Items: items}, nil
 }
 
 // buildMonitorOverview 构建监控概览对象
@@ -255,57 +287,6 @@ func (s *MonitorService) buildMonitorOverview(monitor models.MonitorTask, stats 
 	return overview
 }
 
-// resolveTargetAgents 计算监控任务对应的目标探针范围
-// 规则：
-// 1. 如果既没有指定 AgentIds 也没有指定 Tags，返回所有传入的探针（全部节点）
-// 2. 如果指定了 AgentIds 或 Tags（或两者都指定），则返回匹配的探针（自动去重）
-//   - AgentIds: 直接匹配探针 ID
-//   - Tags: 匹配探针标签中包含任意一个指定标签的探针
-//   - 两者结果取并集
-func (s *MonitorService) resolveTargetAgents(monitor models.MonitorTask, availableAgents []models.Agent) []models.Agent {
-	// 如果既没有指定 AgentIds 也没有指定 Tags，使用所有可用探针
-	if len(monitor.AgentIds) == 0 && len(monitor.Tags) == 0 {
-		return availableAgents
-	}
-
-	// 使用 map 来去重
-	targetAgentIDSet := make(map[string]struct{})
-
-	// 1. 处理通过 AgentIds 指定的探针
-	if len(monitor.AgentIds) > 0 {
-		for _, agentID := range monitor.AgentIds {
-			targetAgentIDSet[agentID] = struct{}{}
-		}
-	}
-
-	// 2. 处理通过 Tags 指定的探针
-	if len(monitor.Tags) > 0 {
-		for _, agent := range availableAgents {
-			if agent.Tags != nil && len(agent.Tags) > 0 {
-				// 检查探针的标签中是否包含任何一个指定的标签
-				for _, agentTag := range agent.Tags {
-					for _, monitorTag := range monitor.Tags {
-						if agentTag == monitorTag {
-							targetAgentIDSet[agent.ID] = struct{}{}
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 3. 根据去重后的 ID 集合筛选探针
-	targetAgents := make([]models.Agent, 0, len(targetAgentIDSet))
-	for _, agent := range availableAgents {
-		if _, ok := targetAgentIDSet[agent.ID]; ok {
-			targetAgents = append(targetAgents, agent)
-		}
-	}
-
-	return targetAgents
-}
-
 // sendMonitorConfigToAgent 向指定探针发送监控配置（内部方法）
 func (s *MonitorService) sendMonitorConfigToAgent(agentID string, payload protocol.MonitorConfigPayload) error {
 	msgData, err := json.Marshal(protocol.OutboundMessage{
@@ -321,25 +302,23 @@ func (s *MonitorService) sendMonitorConfigToAgent(agentID string, payload protoc
 
 // SendMonitorTaskToAgents 向指定探针发送单个监控任务（公开方法）
 func (s *MonitorService) SendMonitorTaskToAgents(ctx context.Context, monitor models.MonitorTask) error {
-	// 实时获取所有在线探针，避免依赖数据库状态
-	onlineIDs := s.wsManager.GetAllClients()
-	if len(onlineIDs) == 0 {
-		return nil
-	}
-
-	// 查询在线探针的详细信息
-	onlineAgents, err := s.agentRepo.ListByIDs(ctx, onlineIDs)
+	// 解析目标探针集合（指定探针与标签匹配探针的并集，均未指定时对所有探针生效）
+	targetSet, err := resolveMonitorTargetSet(ctx, s.agentRepo, &monitor)
 	if err != nil {
-		s.logger.Error("获取在线探针信息失败", zap.Error(err))
 		return err
 	}
-	if len(onlineAgents) == 0 {
-		return nil
+
+	var targetAgentIDs []string
+	if targetSet.all {
+		// 没有指定探针和标签，向所有在线探针发送
+		targetAgentIDs = s.wsManager.GetAllClients()
+	} else {
+		for agentID := range targetSet.ids {
+			targetAgentIDs = append(targetAgentIDs, agentID)
+		}
 	}
 
-	// 使用统一的方法计算目标探针
-	targetAgents := s.resolveTargetAgents(monitor, onlineAgents)
-	if len(targetAgents) == 0 {
+	if len(targetAgentIDs) == 0 {
 		return nil
 	}
 
@@ -368,13 +347,17 @@ func (s *MonitorService) SendMonitorTaskToAgents(ctx context.Context, monitor mo
 	}
 
 	// 向每个目标探针发送
-	for _, agent := range targetAgents {
-		if err := s.sendMonitorConfigToAgent(agent.ID, payload); err != nil {
-			s.logger.Error("发送监控配置失败",
-				zap.String("taskID", monitor.ID),
-				zap.String("taskName", monitor.Name),
-				zap.String("agentID", agent.ID),
-				zap.Error(err))
+	for _, agentID := range targetAgentIDs {
+		if err := s.sendMonitorConfigToAgent(agentID, payload); err != nil {
+			if errors.Is(err, ws.ErrClientNotFound) {
+				// 忽略未连接的探针
+			} else {
+				s.logger.Error("发送监控配置失败",
+					zap.String("taskID", monitor.ID),
+					zap.String("taskName", monitor.Name),
+					zap.String("agentID", agentID),
+					zap.Error(err))
+			}
 		}
 	}
 
@@ -390,17 +373,11 @@ func (s *MonitorService) GetMonitorStatsByID(ctx context.Context, monitorID stri
 	}
 
 	// 查询统计数据
-	stats := s.metricService.GetMonitorStats(monitorID)
+	stats := s.metricService.GetMonitorStats(ctx, monitorID)
 	// 构建监控概览对象
 	overview := s.buildMonitorOverview(monitor, stats)
 
 	return &overview, nil
-}
-
-// GetMonitorHistory 获取监控任务的历史时序数据
-// 直接返回 VictoriaMetrics 的原始时序数据，包含所有探针的独立序列
-func (s *MonitorService) GetMonitorHistory(ctx context.Context, monitorID string, start, end int64, aggregation string) (*metric.GetMetricsResponse, error) {
-	return s.metricService.GetMonitorHistory(ctx, monitorID, start, end, aggregation)
 }
 
 // GetMonitorByAuth 根据认证状态获取监控任务（已登录返回全部，未登录返回公开可见）
@@ -436,7 +413,11 @@ func (s *MonitorService) GetLatestMonitorMetricsByType(ctx context.Context, moni
 	// 在缓存中查询最新的监控数据
 	var result []protocol.MonitorData
 	for _, task := range monitorTasks {
-		monitorData := s.metricService.GetMonitorAgentStats(task.ID)
+		monitorData := s.metricService.GetMonitorAgentStats(ctx, task.ID)
+		// 填充监控任务名称
+		for i := range monitorData {
+			monitorData[i].MonitorName = task.Name
+		}
 		result = append(result, monitorData...)
 	}
 
@@ -454,7 +435,11 @@ func (s *MonitorService) GetAllLatestMonitorMetrics(ctx context.Context) ([]prot
 	// 在缓存中查询最新的监控数据
 	var result []protocol.MonitorData
 	for _, task := range monitorTasks {
-		monitorData := s.metricService.GetMonitorAgentStats(task.ID)
+		monitorData := s.metricService.GetMonitorAgentStats(ctx, task.ID)
+		// 填充监控任务名称
+		for i := range monitorData {
+			monitorData[i].MonitorName = task.Name
+		}
 		result = append(result, monitorData...)
 	}
 	return result, nil

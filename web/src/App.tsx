@@ -1,22 +1,15 @@
 import {RouterProvider} from 'react-router-dom';
 import {App as AntdApp, ConfigProvider} from 'antd';
 import zhCN from 'antd/locale/zh_CN';
-import router from './router';
-import 'dayjs/locale/zh-cn';
-import dayjs from 'dayjs';
-import './App.css';
+import adminRouter from '@/router/admin';
+import {ColorModeProvider} from '@/shared/contexts/ColorModeContext';
 
-// 设置 dayjs 为中文
-dayjs.locale('zh-cn');
-
-function App() {
+export default function AdminApp() {
     return (
-        <ConfigProvider locale={zhCN}>
-            <AntdApp>
-                <RouterProvider router={router}/>
-            </AntdApp>
-        </ConfigProvider>
+        <ColorModeProvider>
+            <ConfigProvider locale={zhCN}>
+                <AntdApp><RouterProvider router={adminRouter}/></AntdApp>
+            </ConfigProvider>
+        </ColorModeProvider>
     );
 }
-
-export default App;

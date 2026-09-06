@@ -1,8 +1,8 @@
 package metric
 
 import (
-	"github.com/dushixiang/pika/internal/protocol"
 	"github.com/go-orz/toolkit/syncx"
+	"github.com/pika-monitor/pika/internal/protocol"
 )
 
 // LatestMonitorMetrics 监控任务的最新指标（按 agent 分组）
@@ -27,6 +27,19 @@ type MonitorStatsResult struct {
 		Unknown int `json:"unknown"` // 未知状态探针数量
 	} `json:"agentStats"` // 探针状态分布
 	LastCheckTime int64 `json:"lastCheckTime"` // 最后检测时间(毫秒时间戳)
+}
+
+// MonitorSparklinePoint 是公开服务列表使用的单分钟响应时间摘要。
+type MonitorSparklinePoint struct {
+	Timestamp int64   `json:"timestamp"`
+	Avg       float64 `json:"avg"`
+	Max       float64 `json:"max"`
+}
+
+// PublicMonitorSparklinesResponse 是公开服务列表的独立趋势响应。
+type PublicMonitorSparklinesResponse struct {
+	GeneratedAt int64                              `json:"generatedAt"`
+	Items       map[string][]MonitorSparklinePoint `json:"items"`
 }
 
 // PublicMonitorOverview 用于公开展示的监控配置及汇总数据

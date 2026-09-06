@@ -6,13 +6,12 @@ package internal
 import (
 	"time"
 
-	"github.com/dushixiang/pika/internal/config"
-	"github.com/dushixiang/pika/internal/handler"
-	"github.com/dushixiang/pika/internal/repo"
-	"github.com/dushixiang/pika/internal/service"
-	"github.com/dushixiang/pika/internal/vmclient"
-	"github.com/dushixiang/pika/internal/websocket"
 	"github.com/google/wire"
+	"github.com/pika-monitor/pika/internal/config"
+	"github.com/pika-monitor/pika/internal/handler"
+	"github.com/pika-monitor/pika/internal/service"
+	"github.com/pika-monitor/pika/internal/vmclient"
+	"github.com/pika-monitor/pika/internal/websocket"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -30,26 +29,27 @@ func InitializeApp(logger *zap.Logger, db *gorm.DB, cfg *config.AppConfig) (*App
 		service.NewGitHubOAuthService,
 		service.NewApiKeyService,
 		service.NewAlertService,
+		service.NewAlertRuleService,
 		service.NewPropertyService,
+		service.NewNotificationService,
 		service.NewMonitorService,
 		service.NewTamperService,
 		service.NewTrafficService,
 		service.NewMetricService,
 		service.NewGeoIPService,
 		service.NewDDNSService,
+		service.NewSSHLoginService,
+		service.NewPublicIPService,
+		service.NewThemeService,
 
 		service.NewNotifier,
 		// WebSocket Manager
 		websocket.NewManager,
 
-		// Repositories
-		repo.NewTamperRepo,
-		repo.NewDDNSConfigRepo,
-		repo.NewDDNSRecordRepo,
-
 		// Handlers
 		handler.NewAgentHandler,
 		handler.NewAlertHandler,
+		handler.NewAlertRuleHandler,
 		handler.NewPropertyHandler,
 		handler.NewMonitorHandler,
 		handler.NewApiKeyHandler,
@@ -57,6 +57,9 @@ func InitializeApp(logger *zap.Logger, db *gorm.DB, cfg *config.AppConfig) (*App
 		handler.NewTamperHandler,
 		handler.NewDNSProviderHandler,
 		handler.NewDDNSHandler,
+		handler.NewSSHLoginHandler,
+		handler.NewThemeHandler,
+		handler.NewWebHandler,
 
 		// App Components
 		wire.Struct(new(AppComponents), "*"),
@@ -70,20 +73,29 @@ type AppComponents struct {
 	AgentHandler       *handler.AgentHandler
 	ApiKeyHandler      *handler.ApiKeyHandler
 	AlertHandler       *handler.AlertHandler
+	AlertRuleHandler   *handler.AlertRuleHandler
 	PropertyHandler    *handler.PropertyHandler
 	MonitorHandler     *handler.MonitorHandler
 	TamperHandler      *handler.TamperHandler
 	DNSProviderHandler *handler.DNSProviderHandler
 	DDNSHandler        *handler.DDNSHandler
+	SSHLoginHandler    *handler.SSHLoginHandler
+	ThemeHandler       *handler.ThemeHandler
+	WebHandler         *handler.WebHandler
 
-	AgentService    *service.AgentService
-	MetricService   *service.MetricService
-	AlertService    *service.AlertService
-	PropertyService *service.PropertyService
-	MonitorService  *service.MonitorService
-	ApiKeyService   *service.ApiKeyService
-	TamperService   *service.TamperService
-	DDNSService     *service.DDNSService
+	AgentService     *service.AgentService
+	TrafficService   *service.TrafficService
+	MetricService    *service.MetricService
+	AlertService     *service.AlertService
+	AlertRuleService *service.AlertRuleService
+	PropertyService  *service.PropertyService
+	MonitorService   *service.MonitorService
+	ApiKeyService    *service.ApiKeyService
+	TamperService    *service.TamperService
+	DDNSService      *service.DDNSService
+	SSHLoginService  *service.SSHLoginService
+	PublicIPService  *service.PublicIPService
+	ThemeService     *service.ThemeService
 
 	WSManager *websocket.Manager
 	VMClient  *vmclient.VMClient
@@ -91,17 +103,21 @@ type AppComponents struct {
 
 // provideVMClient 提供 VictoriaMetrics 客户端
 func provideVMClient(cfg *config.AppConfig, logger *zap.Logger) *vmclient.VMClient {
+	// 写入超时默认 10s：VM 抖动时快速失败，未确认消息由探针重放
+	// 机制兜底，避免 30s 级别的停滞阻塞探针消息的串行处理
+	const defaultWriteTimeout = 10 * time.Second
+
 	// 检查配置
 	if cfg.VictoriaMetrics == nil || !cfg.VictoriaMetrics.Enabled {
 		logger.Info("VictoriaMetrics is not enabled, using default configuration")
 		// 返回一个默认配置的客户端（用于本地开发）
-		return vmclient.NewVMClient("http://localhost:8428", 30*time.Second, 60*time.Second)
+		return vmclient.NewVMClient("http://localhost:8428", defaultWriteTimeout, 60*time.Second)
 	}
 
 	// 使用配置创建客户端
 	writeTimeout := time.Duration(cfg.VictoriaMetrics.WriteTimeout) * time.Second
 	if writeTimeout == 0 {
-		writeTimeout = 30 * time.Second
+		writeTimeout = defaultWriteTimeout
 	}
 
 	queryTimeout := time.Duration(cfg.VictoriaMetrics.QueryTimeout) * time.Second

@@ -1,73 +1,39 @@
-# React + TypeScript + Vite
+# Pika Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+`web/` 是官方管理后台前端（React/Vite），发布到 `/admin/assets/*`。
 
-Currently, two official plugins are available:
+官方默认公开主题是独立项目 [`pika-monitor/pika-default-theme`](https://github.com/pika-monitor/pika-default-theme)。本地开发时，`Makefile` 默认从同级目录 `../pika-default-theme` 构建它。
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## 开发
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd web && npm ci && npm run dev                  # 管理后台，http://localhost:5174/admin/
+cd ../pika-default-theme && npm ci && npm run dev # 默认主题，http://localhost:5173/
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+管理后台开发服务器保留 `/admin/*`，并将其他路径代理到 `http://localhost:8080`。因此启动 Pika
+后端后，可以通过 `http://localhost:5174/` 访问当前公开主题，通过
+`http://localhost:5174/admin/` 访问管理后台。默认主题项目的开发服务器也会把 `/api/*`
+代理到 Pika 后端，两者可以同时启动。
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## 构建
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+`make build-web` 构建 `web/` 和独立的默认主题，将两者放到独立的发布目录：
+
+- 管理后台：`web/dist/`；
+- 默认主题：`themes/default/`。
+
+如果主题源码不在默认位置，可以显式指定：
+
+```bash
+make DEFAULT_THEME_DIR=/path/to/pika-default-theme build-web
 ```
+
+GitHub Actions 使用 `.github/default-theme.ref` 中的完整 Git Commit SHA 锁定默认主题，保证同一 Pika 版本的发布构建可复现。
+
+## 运行路径
+
+- 公开主题：`/`、`/servers/*`、`/monitors/*`；
+- 管理后台：`/admin/*`，包括 `/admin/login` 和 OAuth/OIDC 回调；
+- 管理后台资源：`/admin/assets/*`；
+- 活动主题资源：`/t/*`。

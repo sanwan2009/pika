@@ -15,7 +15,7 @@ const GitHubCallback = () => {
 
             if (!code || !state) {
                 messageApi.error('缺少认证参数');
-                navigate('/login');
+                navigate('/admin/login');
                 return;
             }
 
@@ -31,7 +31,7 @@ const GitHubCallback = () => {
                 navigate('/admin/agents');
             } catch (error: any) {
                 messageApi.error(error.response?.data?.message || 'GitHub 认证失败');
-                navigate('/login');
+                navigate('/admin/login');
             }
         };
 
@@ -39,10 +39,10 @@ const GitHubCallback = () => {
     }, []);
 
     return (
-        <div className="min-h-screen flex items-center justify-center">
+        <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-zinc-950 transition-colors duration-300">
             <div className="text-center">
-                <div className="text-lg mb-2">正在处理 GitHub 认证...</div>
-                <div className="text-gray-500">请稍候</div>
+                <div className="text-lg mb-2 text-slate-900 dark:text-zinc-100 font-medium">正在处理 GitHub 认证...</div>
+                <div className="text-slate-500 dark:text-zinc-500">请稍候</div>
             </div>
         </div>
     );

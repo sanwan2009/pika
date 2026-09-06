@@ -2,19 +2,25 @@ package models
 
 // AlertRecord 告警记录
 type AlertRecord struct {
-	ID          int64   `gorm:"primaryKey;autoIncrement" json:"id"`    // 记录ID
-	AgentID     string  `gorm:"index" json:"agentId"`                  // 探针ID
-	AgentName   string  `json:"agentName"`                             // 探针名称
-	AlertType   string  `json:"alertType"`                             // 告警类型: cpu, memory, disk, network
-	Message     string  `json:"message"`                               // 告警消息
-	Threshold   float64 `json:"threshold"`                             // 告警阈值
-	ActualValue float64 `json:"actualValue"`                           // 实际值
-	Level       string  `json:"level"`                                 // 告警级别: info, warning, critical
-	Status      string  `json:"status"`                                // 状态: firing（告警中）, resolved（已恢复）
-	FiredAt     int64   `gorm:"index" json:"firedAt"`                  // 触发时间（时间戳毫秒）
-	ResolvedAt  int64   `json:"resolvedAt,omitempty"`                  // 恢复时间（时间戳毫秒）
-	CreatedAt   int64   `json:"createdAt"`                             // 创建时间（时间戳毫秒）
-	UpdatedAt   int64   `json:"updatedAt" gorm:"autoUpdateTime:milli"` // 更新时间（时间戳毫秒）
+	ID                 int64   `gorm:"primaryKey;autoIncrement" json:"id"`           // 记录ID
+	AgentID            string  `gorm:"index" json:"agentId"`                         // 探针ID
+	AgentName          string  `json:"agentName"`                                    // 探针名称
+	AlertType          string  `json:"alertType"`                                    // 告警类型: cpu, memory, disk, network
+	ConfigID           string  `gorm:"index;default:global" json:"configId"`         // 命中的告警规则 ID（global = 默认规则）
+	ConfigName         string  `json:"configName"`                                   // 命中的告警规则名称（快照）
+	Message            string  `json:"message"`                                      // 告警消息
+	Threshold          float64 `json:"threshold"`                                    // 告警阈值
+	ActualValue        float64 `json:"actualValue"`                                  // 告警触发时的实际值
+	ResolvedValue      float64 `json:"resolvedValue,omitempty"`                      // 恢复时的实际值
+	Level              string  `json:"level"`                                        // 告警级别: info, warning, critical
+	Status             string  `json:"status"`                                       // 状态: firing（告警中）, resolved（已恢复）
+	FiredAt            int64   `gorm:"index" json:"firedAt"`                         // 触发时间（时间戳毫秒）
+	ResolvedAt         int64   `json:"resolvedAt,omitempty"`                         // 恢复时间（时间戳毫秒）
+	NotificationStatus string  `json:"notificationStatus"`                           // 通知状态: pending, sent, failed
+	NotificationSentAt int64   `json:"notificationSentAt,omitempty"`                 // 通知发送时间（时间戳毫秒）
+	NotificationError  string  `gorm:"type:text" json:"notificationError,omitempty"` // 通知发送失败原因
+	CreatedAt          int64   `json:"createdAt"`                                    // 创建时间（时间戳毫秒）
+	UpdatedAt          int64   `json:"updatedAt" gorm:"autoUpdateTime:milli"`        // 更新时间（时间戳毫秒）
 }
 
 func (AlertRecord) TableName() string {
@@ -26,6 +32,7 @@ type AlertState struct {
 	ID            string  `gorm:"primaryKey" json:"id"`                  // 状态ID（格式：agentId:configId:alertType）
 	AgentID       string  `gorm:"index" json:"agentId"`                  // 探针ID
 	AlertType     string  `gorm:"index" json:"alertType"`                // 告警类型
+	ConfigID      string  `gorm:"index;default:global" json:"configId"`  // 告警规则 ID（global = 默认规则）
 	Value         float64 `json:"value"`                                 // 当前值
 	Threshold     float64 `json:"threshold"`                             // 阈值
 	StartTime     int64   `json:"startTime"`                             // 开始超过阈值的时间
